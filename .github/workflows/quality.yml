@@ -1,0 +1,54 @@
+name: Quality
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ".[dev]"
+      - run: ruff format --check app tests
+      - run: ruff check .
+      - run: mypy app
+      - run: pytest -q --cov=app --cov-branch --cov-report=term-missing --cov-fail-under=80
+      - run: coverage report --include='app/ai.py,app/matching.py,app/services.py' --fail-under=90
+      - run: bandit -q -r app
+      - run: pip-audit --skip-editable
+      - run: DATABASE_URL=sqlite:///./ci_migration.db alembic upgrade head
+      - run: DATABASE_URL=sqlite:///./ci_migration.db alembic check
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm build
+      - run: pnpm audit --audit-level high
+
+  compose:
+    runs-on: ubuntu-latest
+    env:
+      POSTGRES_DB: jobagent
+      POSTGRES_USER: jobagent
+      POSTGRES_PASSWORD: ci-only-not-a-secret
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose config -q
+      - run: docker compose build
