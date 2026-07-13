@@ -8,8 +8,9 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import sessionmaker
 
+from app.cv import LocalCvStorage, upload_rate_limiter
 from app.db import Base, build_engine, get_db
-from app.main import app
+from app.main import app, get_cv_storage
 
 
 @pytest.fixture()
@@ -29,8 +30,13 @@ def client(tmp_path):
             db.close()
 
     app.dependency_overrides[get_db] = override_db
+    storage = LocalCvStorage(str(tmp_path / "cv_uploads"))
+    app.dependency_overrides[get_cv_storage] = lambda: storage
+    upload_rate_limiter.reset()
+    app.state.test_cv_storage = storage
     app.state.test_engine = engine
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()
+    upload_rate_limiter.reset()
     Base.metadata.drop_all(bind=engine)

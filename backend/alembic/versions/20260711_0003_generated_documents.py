@@ -7,13 +7,16 @@ Create Date: 2026-07-11
 
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
 
 revision = "20260711_0003"
 down_revision = "20260711_0002"
 branch_labels = None
 depends_on = None
 
-document_status = sa.Enum("VALID", "INVALID", name="generateddocumentstatus")
+document_status = postgresql.ENUM(
+    "VALID", "INVALID", name="generateddocumentstatus", create_type=False
+)
 
 
 def upgrade() -> None:

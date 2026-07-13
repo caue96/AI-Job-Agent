@@ -1,5 +1,8 @@
 # Architecture and data model
 
+The discovery provider trust boundary, database-backed scheduler, normalization, canonicalization, and
+ranking pipeline are documented in [job-discovery.md](job-discovery.md).
+
 ## Runtime architecture
 
 The repository contains a React/Vite dashboard and a modular FastAPI API. Pydantic validates
@@ -32,6 +35,9 @@ version allocation and persistence. No queue, worker, Redis, or shared cache exi
 | `app/services.py` | Workflow transitions, audit events, deduplication, analysis and document persistence |
 | `app/matching.py` | Pure deterministic scoring and configurable hard blockers |
 | `app/ai.py` | Candidate fact construction, prompt boundaries, providers, and grounding validation |
+| `app/cv.py` | PDF validation/storage, extraction, grounding, normalization, comparison, retention, and profile persistence |
+| `app/cv_ai.py` | Strict CV extraction providers, prompt boundary, deterministic parser, and fallback |
+| `app/cv_schemas.py` | Evidence-bearing CV draft, comparison, import, and version contracts |
 | `app/schemas.py` | Strict request validation and public response contracts |
 | `app/models.py` | SQLAlchemy tables, relationships, constraints, and indexes |
 | `app/config.py` | Typed environment configuration and production fail-closed guard |
@@ -61,10 +67,22 @@ erDiagram
   USERS ||--o| CANDIDATE_PROFILES : owns
   USERS ||--o{ APPLICATIONS : owns
   USERS ||--o{ AUDIT_LOGS : creates
+  USERS ||--o{ CV_IMPORTS : owns
   CANDIDATE_PROFILES ||--o{ PROFILE_SKILLS : has
   CANDIDATE_PROFILES ||--o{ PROFILE_LANGUAGES : has
   CANDIDATE_PROFILES ||--o{ EMPLOYMENT_ENTRIES : has
+  CANDIDATE_PROFILES ||--o{ PROFILE_VERSIONS : snapshots
+  CV_IMPORTS ||--o{ PROFILE_VERSIONS : produces
   JOBS ||--o{ APPLICATIONS : tracks
+  USERS ||--o| DISCOVERY_SEARCH_PROFILES : owns
+  USERS ||--o{ DISCOVERY_SEARCH_CONFIGURATIONS : owns
+  DISCOVERY_SEARCH_CONFIGURATIONS ||--o{ DISCOVERY_SEARCH_RUNS : schedules
+  DISCOVERY_SEARCH_RUNS ||--o{ DISCOVERY_PROVIDER_RUNS : isolates
+  DISCOVERY_PROVIDER_RUNS ||--o{ DISCOVERY_RAW_RESULTS : retains
+  DISCOVERY_SEARCH_RUNS ||--o{ DISCOVERY_MATCH_RESULTS : ranks
+  JOBS ||--o{ DISCOVERY_JOB_SOURCES : references
+  JOBS ||--o{ DISCOVERY_MATCH_RESULTS : scores
+  USERS ||--o{ DISCOVERY_NOTIFICATIONS : receives
   APPLICATIONS ||--o{ APPLICATION_STATUS_HISTORY : records
   APPLICATIONS ||--o{ GENERATED_DOCUMENTS : versions
 ```
@@ -73,6 +91,12 @@ Jobs are deduplicated by unique source/external ID, normalized URL, and a stable
 Applications are unique per user/job. Status history and audit logs are append-only records of
 workflow actions; generated documents are unique per application/version. Composite indexes
 support ordered job, application, and history queries.
+
+CV uploads are streamed to a private local-storage boundary under generated UUID keys. PDF and AI
+work run in a worker thread so the async server event loop remains responsive. Extracted pages stay
+in the user-scoped import record to support evidence review; immutable profile versions preserve the
+entire approved rich profile while the existing normalized profile tables receive the fields used by
+matching and generation. This avoids widening the existing profile API contract.
 
 ## Trust and authorization boundaries
 
@@ -87,8 +111,10 @@ validated at the API boundary and never interpolated into SQL or system/develope
 ## Known scaling boundaries
 
 - Job and application collection endpoints are unpaginated and grow linearly with record count.
+- Discovery endpoints are bounded to 500 ranked rows and ten provider pages per query; long-term
+  catalogs will need cursor pagination and archival.
 - AI generation occupies a request worker while the provider responds; adding background work
   requires a new status/polling contract and durable queue.
 - There is no shared response cache; mutable user data is read directly from the database.
-- The frontend is intentionally a single-screen application and currently has no separate unit
-  coverage threshold.
+- The frontend remains a single-screen application; critical CV and discovery journeys have browser
+  tests, but component-level coverage is not measured separately.

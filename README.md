@@ -4,6 +4,10 @@ An approval-first workspace for importing vacancies, scoring them deterministica
 grounded application material, and tracking manual job applications. The system never submits
 an application automatically.
 
+The profile workflow accepts text-based PDF CVs, validates and stores them under generated names,
+extracts page-grounded candidate facts, and requires an editable review plus explicit merge or
+replace confirmation before anything reaches the candidate profile.
+
 ## Current status
 
 Phases 2–6 are implemented:
@@ -13,11 +17,17 @@ Phases 2–6 are implemented:
 - deterministic matching with configurable hard-rejection rules and explainable scores;
 - grounded AI document generation with mock and OpenAI provider modes;
 - a React review dashboard with an explicit submission-approval workflow;
+- secure PDF CV upload, extraction, evidence review, merge/replace, and profile version history;
+- compliant job discovery through documented APIs/public feeds and user-authorized imports, with
+  multilingual search profiles, duplicate merging, schedules, explainable rankings, and notifications;
 - security, performance, coverage, migration, and dependency quality gates.
 
 Version 1.0 is a local-only release. Authentication and tenant isolation are not implemented,
 and `APP_ENV=production` intentionally prevents startup. Do not expose the API to untrusted
 networks.
+
+Provider access decisions, scheduling, imports, retention, and troubleshooting are documented in
+[`docs/job-discovery.md`](docs/job-discovery.md).
 
 ## Prerequisites
 
@@ -96,6 +106,7 @@ DATABASE_URL=sqlite:///./migration_check.db alembic check
 cd ../frontend
 pnpm lint
 pnpm build
+pnpm test:e2e
 pnpm audit --audit-level high
 ```
 
@@ -107,6 +118,7 @@ pnpm audit --audit-level high
 - [Local and container deployment](docs/deployment.md)
 - [Provider integration](docs/providers.md)
 - [AI architecture and prompt registry](docs/ai-architecture.md)
+- [CV import workflow and operations](docs/cv-import.md)
 - [Roadmap and limitations](docs/roadmap.md)
 - [Production-readiness review](docs/production-readiness-review.md)
 - [Security audit](docs/security-audit.md)

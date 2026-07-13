@@ -95,12 +95,12 @@ unprivileged user.
 
 ## Medium-priority issues
 
-### M1. No rate limiting or abuse quotas (open, production blocked)
+### M1. No distributed rate limiting or AI budgets (open, production blocked)
 
-The API has no per-user request limits or AI-generation budgets. A correct implementation
-depends on the future authenticated identity and deployment topology. Add distributed,
-identity-aware limits before enabling production; do not use an in-process counter in a
-multi-worker deployment.
+CV uploads have a bounded process-local, per-development-user limit. Other API operations have no
+per-user quotas or AI-generation budgets. A production implementation depends on authenticated
+identity and deployment topology. Add distributed, identity-aware limits before enabling
+production; the CV limiter is intentionally not represented as a multi-worker security boundary.
 
 ### M2. Browser security headers are incomplete at the repository proxy (open)
 
@@ -143,11 +143,17 @@ production.
 | XSS | React escaping used; no raw HTML sink; baseline proxy headers present |
 | CSRF | Not applicable without cookies; future requirement documented (M3) |
 | SSRF | URLs are stored, never fetched; non-HTTP(S) schemes rejected |
-| Path traversal | No user-controlled filesystem paths or filesystem operations |
-| File uploads | No upload endpoint or multipart handling exists |
+| Path traversal | CV storage accepts generated UUID keys only, resolves under one configured root, and never uses the original name as a path |
+| File uploads | PDF extension/MIME/signature, streamed size, page count, encryption, corruption, empty/scanned text, rate, and retention controls; no OCR or content execution |
 | Sensitive logging | No request/document/contact/secret body logging found; audit events contain metadata |
 | AI prompt safety | Provider output is fact IDs only; prose is rendered from validated stored facts |
 | User input validation | Unknown fields rejected; scalar, collection, mapping, URL, and date bounds enforced |
+
+CV text and provider output are untrusted prompt data. Exact page-quote verification removes
+unsupported extraction claims; review changes are relabelled as user assertions. Normal APIs do not
+expose raw page text, hashes, or storage keys. Remaining local-only limitations are lack of malware
+scanning and process isolation for adversarial parser workloads; the 10 MB/40-page defaults reduce
+exposure, and production remains fail-closed.
 
 ## Verification
 

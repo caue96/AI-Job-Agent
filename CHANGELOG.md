@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.0.0 job discovery completion
+
+- Added the documented provider compliance registry, official ITJobs.pt and InfoJobs adapters,
+  configured Tecnoempleo RSS support, and compliant manual/CSV/imported-email fallbacks.
+- Added editable multilingual search profiles, database-backed scheduling, isolated provider runs,
+  raw and normalized storage, cross-source duplicate groups, deterministic ranking, visible hard
+  filters, and deduplicated in-app notifications.
+- Added the responsive discovery dashboard, scoped APIs, migration, deterministic backend coverage,
+  browser end-to-end coverage, security controls, provider documentation, and Compose worker.
+
+## 1.0.0 CV import completion
+
+- Added private PDF CV upload, validation, extraction, scanned-document detection, retention, and
+  user-controlled deletion.
+- Added strict evidence-bearing AI extraction with prompt-injection boundaries, deterministic
+  fallback, exact page-quote verification, and user-edit provenance.
+- Added accessible upload/review/compare/merge/replace UI, immutable profile versions, audit events,
+  migration, backend regression coverage, and a Playwright end-to-end workflow test.
+- Repaired the pre-release foundation and generated-document PostgreSQL enum migrations so a fresh
+  Compose database can apply the complete migration chain without duplicate type creation.
+
 All notable changes to this project are documented here. The project uses semantic versioning.
 
 ## 1.0.0 - 2026-07-12

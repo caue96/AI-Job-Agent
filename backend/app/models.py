@@ -47,6 +47,24 @@ class GeneratedDocumentStatus(enum.StrEnum):
     INVALID = "INVALID"
 
 
+class CvImportStatus(enum.StrEnum):
+    PDF_SELECTED = "PDF_SELECTED"
+    PDF_VALIDATED = "PDF_VALIDATED"
+    TEXT_EXTRACTED = "TEXT_EXTRACTED"
+    PROFILE_PARSED = "PROFILE_PARSED"
+    AWAITING_REVIEW = "AWAITING_REVIEW"
+    PROFILE_CONFIRMED = "PROFILE_CONFIRMED"
+    PROFILE_SAVED = "PROFILE_SAVED"
+
+
+class DiscoveryRunStatus(enum.StrEnum):
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    PARTIAL = "PARTIAL"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+
+
 class User(Base):
     __tablename__ = "users"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
@@ -89,6 +107,50 @@ class CandidateProfile(Base):
         back_populates="profile", cascade="all, delete-orphan"
     )
     __table_args__ = (UniqueConstraint("user_id"),)
+
+
+class CvImport(Base):
+    __tablename__ = "cv_imports"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    status: Mapped[CvImportStatus] = mapped_column(Enum(CvImportStatus), index=True)
+    original_filename: Mapped[str] = mapped_column(String(255))
+    storage_key: Mapped[str | None] = mapped_column(String(100), unique=True)
+    media_type: Mapped[str] = mapped_column(String(100))
+    size_bytes: Mapped[int] = mapped_column(Integer)
+    sha256: Mapped[str] = mapped_column(String(64), index=True)
+    page_count: Mapped[int | None] = mapped_column(Integer)
+    extracted_pages: Mapped[list[dict]] = mapped_column(JSON, default=list)
+    sections: Mapped[dict] = mapped_column(JSON, default=dict)
+    draft: Mapped[dict | None] = mapped_column(JSON)
+    validation: Mapped[dict] = mapped_column(JSON, default=dict)
+    model_metadata: Mapped[dict] = mapped_column(JSON, default=dict)
+    file_deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+    __table_args__ = (Index("ix_cv_imports_user_created", "user_id", "created_at"),)
+
+
+class ProfileVersion(Base):
+    __tablename__ = "profile_versions"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    profile_id: Mapped[str] = mapped_column(
+        ForeignKey("candidate_profiles.id", ondelete="CASCADE"), index=True
+    )
+    cv_import_id: Mapped[str | None] = mapped_column(
+        ForeignKey("cv_imports.id", ondelete="SET NULL"), index=True
+    )
+    version: Mapped[int] = mapped_column(Integer)
+    strategy: Mapped[str] = mapped_column(String(20))
+    snapshot: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    __table_args__ = (
+        UniqueConstraint("profile_id", "version", name="uq_profile_version"),
+        Index("ix_profile_versions_profile_created", "profile_id", "created_at"),
+    )
 
 
 class ProfileSkill(Base):
@@ -144,6 +206,22 @@ class Job(Base):
     description: Mapped[str] = mapped_column(Text)
     requirements: Mapped[list[str]] = mapped_column(JSON, default=list)
     preferred_qualifications: Mapped[list[str]] = mapped_column(JSON, default=list)
+    normalized_title: Mapped[str | None] = mapped_column(String(200))
+    application_url: Mapped[str | None] = mapped_column(Text)
+    responsibilities: Mapped[list[str]] = mapped_column(JSON, default=list)
+    region: Mapped[str | None] = mapped_column(String(120))
+    seniority: Mapped[str | None] = mapped_column(String(40))
+    salary_period: Mapped[str | None] = mapped_column(String(20))
+    required_languages: Mapped[list[str]] = mapped_column(JSON, default=list)
+    required_skills: Mapped[list[str]] = mapped_column(JSON, default=list)
+    preferred_skills: Mapped[list[str]] = mapped_column(JSON, default=list)
+    required_years_experience: Mapped[float | None] = mapped_column(nullable=True)
+    work_authorization_information: Mapped[str | None] = mapped_column(Text)
+    relocation_information: Mapped[str | None] = mapped_column(Text)
+    posted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    provider_metadata: Mapped[dict] = mapped_column(JSON, default=dict)
     deadline: Mapped[date | None] = mapped_column(Date)
     discovered_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
@@ -236,3 +314,187 @@ class AuditLog(Base):
     entity_id: Mapped[str] = mapped_column(String(36), index=True)
     metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class DiscoverySearchProfile(Base):
+    __tablename__ = "discovery_search_profiles"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), unique=True)
+    preferences: Mapped[dict] = mapped_column(JSON, default=dict)
+    generated_terms: Mapped[list[str]] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class DiscoverySearchConfiguration(Base):
+    __tablename__ = "discovery_search_configurations"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    provider_settings: Mapped[dict] = mapped_column(JSON, default=dict)
+    schedule_kind: Mapped[str] = mapped_column(String(20), default="MANUAL")
+    schedule_time: Mapped[str] = mapped_column(String(5), default="09:00")
+    timezone: Mapped[str] = mapped_column(String(80), default="UTC")
+    hard_filters: Mapped[dict] = mapped_column(JSON, default=dict)
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+    __table_args__ = (UniqueConstraint("user_id", "name", name="uq_discovery_config_name"),)
+
+
+class DiscoverySearchRun(Base):
+    __tablename__ = "discovery_search_runs"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    configuration_id: Mapped[str] = mapped_column(
+        ForeignKey("discovery_search_configurations.id", ondelete="CASCADE"), index=True
+    )
+    status: Mapped[DiscoveryRunStatus] = mapped_column(Enum(DiscoveryRunStatus), index=True)
+    trigger: Mapped[str] = mapped_column(String(20))
+    lifecycle_stage: Mapped[str] = mapped_column(String(40), default="SEARCH_SCHEDULED")
+    scheduled_key: Mapped[str | None] = mapped_column(String(160), unique=True)
+    counters: Mapped[dict] = mapped_column(JSON, default=dict)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (Index("ix_discovery_runs_user_started", "user_id", "started_at"),)
+
+
+class DiscoverySearchQuery(Base):
+    __tablename__ = "discovery_search_queries"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("discovery_search_runs.id", ondelete="CASCADE"), index=True
+    )
+    provider: Mapped[str] = mapped_column(String(40), index=True)
+    query: Mapped[dict] = mapped_column(JSON)
+
+
+class DiscoveryProviderRun(Base):
+    __tablename__ = "discovery_provider_runs"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("discovery_search_runs.id", ondelete="CASCADE"), index=True
+    )
+    provider: Mapped[str] = mapped_column(String(40), index=True)
+    status: Mapped[DiscoveryRunStatus] = mapped_column(Enum(DiscoveryRunStatus))
+    counters: Mapped[dict] = mapped_column(JSON, default=dict)
+    api_usage: Mapped[dict] = mapped_column(JSON, default=dict)
+    retry_count: Mapped[int] = mapped_column(Integer, default=0)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class DiscoveryProviderCursor(Base):
+    __tablename__ = "discovery_provider_cursors"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    configuration_id: Mapped[str] = mapped_column(
+        ForeignKey("discovery_search_configurations.id", ondelete="CASCADE"), index=True
+    )
+    provider: Mapped[str] = mapped_column(String(40))
+    cursor: Mapped[dict] = mapped_column(JSON, default=dict)
+    failure_count: Mapped[int] = mapped_column(Integer, default=0)
+    circuit_open_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_allowed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (
+        UniqueConstraint("configuration_id", "provider", name="uq_discovery_cursor_provider"),
+    )
+
+
+class DiscoveryRawResult(Base):
+    __tablename__ = "discovery_raw_results"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    provider_run_id: Mapped[str] = mapped_column(
+        ForeignKey("discovery_provider_runs.id", ondelete="CASCADE"), index=True
+    )
+    provider: Mapped[str] = mapped_column(String(40), index=True)
+    external_job_id: Mapped[str | None] = mapped_column(String(200))
+    payload: Mapped[dict] = mapped_column(JSON)
+    payload_hash: Mapped[str] = mapped_column(String(64), index=True)
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class DiscoveryJobSource(Base):
+    __tablename__ = "discovery_job_sources"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    job_id: Mapped[str] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), index=True)
+    provider: Mapped[str] = mapped_column(String(40), index=True)
+    external_job_id: Mapped[str | None] = mapped_column(String(200))
+    canonical_url: Mapped[str | None] = mapped_column(Text)
+    relationship: Mapped[str] = mapped_column(String(30), default="CANONICAL")
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    __table_args__ = (
+        UniqueConstraint("provider", "external_job_id", name="uq_discovery_source_external"),
+    )
+
+
+class DiscoveryDuplicateGroup(Base):
+    __tablename__ = "discovery_duplicate_groups"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    canonical_job_id: Mapped[str] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"))
+    relationship: Mapped[str] = mapped_column(String(30))
+    signals: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class DiscoveryMatchResult(Base):
+    __tablename__ = "discovery_match_results"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("discovery_search_runs.id", ondelete="CASCADE"), index=True
+    )
+    job_id: Mapped[str] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), index=True)
+    score: Mapped[int] = mapped_column(Integer, index=True)
+    recommendation: Mapped[str] = mapped_column(String(30), index=True)
+    hard_rejected: Mapped[bool] = mapped_column(Boolean, default=False)
+    rejection_reasons: Mapped[list[str]] = mapped_column(JSON, default=list)
+    analysis: Mapped[dict] = mapped_column(JSON)
+    user_state: Mapped[str] = mapped_column(String(20), default="NEW")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    __table_args__ = (
+        UniqueConstraint("run_id", "job_id", name="uq_discovery_match_run_job"),
+        Index("ix_discovery_match_user_rank", "user_id", "hard_rejected", "score"),
+    )
+
+
+class DiscoveryProviderError(Base):
+    __tablename__ = "discovery_provider_errors"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    provider_run_id: Mapped[str] = mapped_column(
+        ForeignKey("discovery_provider_runs.id", ondelete="CASCADE"), index=True
+    )
+    provider: Mapped[str] = mapped_column(String(40), index=True)
+    code: Mapped[str] = mapped_column(String(60))
+    safe_message: Mapped[str] = mapped_column(String(500))
+    retryable: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class DiscoveryNotification(Base):
+    __tablename__ = "discovery_notifications"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    event_type: Mapped[str] = mapped_column(String(50), index=True)
+    job_id: Mapped[str | None] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"))
+    deduplication_key: Mapped[str] = mapped_column(String(180))
+    title: Mapped[str] = mapped_column(String(200))
+    body: Mapped[str] = mapped_column(String(500))
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    __table_args__ = (
+        UniqueConstraint("user_id", "deduplication_key", name="uq_notification_dedup"),
+    )

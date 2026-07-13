@@ -1,5 +1,8 @@
 # Provider integration guide
 
+Job-source classifications and permitted access decisions are documented separately in
+[job-discovery.md](job-discovery.md).
+
 ## Current provider support
 
 There is no enabled external job-board adapter and no CSV parser. Jobs are imported by posting a
@@ -28,6 +31,13 @@ Candidate claims have structural provenance because no model-authored prose reac
 package. Human review remains mandatory because users can enter inaccurate profile facts and
 model-selected relevance can be imperfect. The complete prompt registry and failure policy are in
 [`ai-architecture.md`](ai-architecture.md).
+
+The same mode selects CV extraction behavior. `mock` uses the conservative deterministic parser in
+`app/cv_ai.py`; `openai` requests the strict `CvProfileDraft` schema. CV extraction is not free-form
+generation: every value must cite an exact page quote and application code removes unsupported
+claims before display. `AI_FALLBACK_TO_MOCK` also controls CV fallback. A provider failure with
+fallback disabled removes the incomplete upload and returns a redacted 503. See
+[`cv-import.md`](cv-import.md) for the full trust boundary.
 
 ## Requirements for a future job adapter
 

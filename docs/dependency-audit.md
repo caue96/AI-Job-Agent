@@ -26,12 +26,15 @@ future advisory will be published. CI reruns both audits on every push and pull 
 | Dependency | Allowed version | Why it exists | License | Known CVEs |
 | --- | --- | --- | --- | --- |
 | Alembic | `>=1.18.5,<2` | Owns schema migrations and is invoked by Compose and CI. | MIT | None found |
+| defusedxml | `>=0.7.1,<1` | Safely parses untrusted provider RSS without XML entity expansion. | Python-2.0 | None found |
 | FastAPI | `>=0.139,<1` | HTTP routing, dependency injection, middleware integration, OpenAPI, and test client integration. | MIT | None found |
 | email-validator | `>=2.3,<3` | Required by Pydantic's `EmailStr` profile validation. | Unlicense | None found |
 | OpenAI | `>=2.45,<3` | Optional Responses API provider for grounded document generation. Imported only in OpenAI mode. | Apache-2.0 | None found |
 | Pydantic | `>=2.13.4,<3` | Directly imported for strict request/response schemas, validation, and redacted secrets. It is now explicitly declared instead of relying on FastAPI transitively. | MIT | None found |
 | pydantic-settings | `>=2.14.2,<3` | Typed environment and `.env` loading. | MIT | None found |
 | Psycopg with binary extra | `>=3.3.4,<4` | PostgreSQL SQLAlchemy driver used by the Compose database URL; the binary extra provides local wheels. | LGPL-3.0-only | None found |
+| pypdf | `>=6.13.3,<7` | Maintained direct-text PDF reader used for bounded page extraction and encrypted/corrupt detection; it does not execute embedded content. | BSD-3-Clause | None found |
+| python-multipart | `>=0.0.31,<0.0.32` | FastAPI multipart parser required for the single streamed CV file field. Version 0.0.31 fixes CVE-2026-40347, CVE-2026-42561, CVE-2026-53538, CVE-2026-53539, and CVE-2026-53540; the upper bound avoids the incompatible 0.0.32 namespace layout observed with the current FastAPI runtime. | Apache-2.0 | None in the allowed range |
 | SQLAlchemy | `>=2.0.51,<3` | ORM models, sessions, transactions, row locking, and parameterized queries. | MIT | None found |
 | Uvicorn with standard extra | `>=0.51,<1` | ASGI server used by native setup and the API container; standard extras provide production event-loop/protocol support. | BSD-3-Clause | None found |
 
@@ -59,6 +62,7 @@ future advisory will be published. CI reruns both audits on every push and pull 
 | Dependency | Pinned version | Why it exists | License | Known CVEs |
 | --- | ---: | --- | --- | --- |
 | @types/react | `19.2.17` | TypeScript declarations for React. | MIT | None found |
+| @playwright/test | `1.58.2` | Browser-level test of the upload, review, edit, and confirmation workflow. It is development-only. | Apache-2.0 | None found |
 | @types/react-dom | `19.2.3` | TypeScript declarations for React DOM. | MIT | None found |
 | @vitejs/plugin-react | `6.0.3` | React JSX transform and refresh integration in Vite. | MIT | None found |
 | ESLint | `10.7.0` | Frontend static lint runner. | MIT | None found |
@@ -110,4 +114,5 @@ pnpm outdated
 pnpm audit --json
 pnpm lint
 pnpm build
+pnpm test:e2e
 ```

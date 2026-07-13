@@ -7,15 +7,17 @@ Create Date: 2026-07-11
 
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
 
 revision = "20260711_0001"
 down_revision = None
 branch_labels = None
 depends_on = None
 
-application_status = sa.Enum(
+application_status = postgresql.ENUM(
     "DISCOVERED", "ANALYZED", "REJECTED", "SHORTLISTED", "DOCUMENTS_PREPARED", "AWAITING_REVIEW",
-    "APPROVED", "READY_TO_SUBMIT", "SUBMITTED", "INTERVIEW", "OFFER", "WITHDRAWN", name="applicationstatus"
+    "APPROVED", "READY_TO_SUBMIT", "SUBMITTED", "INTERVIEW", "OFFER", "WITHDRAWN",
+    name="applicationstatus", create_type=False,
 )
 
 

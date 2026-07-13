@@ -1,6 +1,12 @@
 .env
 .venv/
+.audit-venv/
 .deps/
+.testdeps/
+.cvdeps/
+backend/.runtimecv/
+data/cv_uploads/
+backend/data/cv_uploads/
 __pycache__/
 .pytest_cache/
 .ruff_cache/
@@ -17,4 +23,6 @@ backend/phase4_migration_check.db
 backend/*.db
 backend/*.egg-info/
 frontend/tsconfig.tsbuildinfo
+frontend/test-results/
+frontend/playwright-report/
 .pnpm-store/

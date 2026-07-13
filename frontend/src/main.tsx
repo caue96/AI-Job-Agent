@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { CvImportPanel } from "./CvImportPanel";
+import { DiscoveryPanel } from "./DiscoveryPanel";
 import "./styles.css";
 
 type Job = {
@@ -339,6 +341,7 @@ function App() {
         </div>
         <nav aria-label="Dashboard sections">
           <a href="#tracker">Overview</a>
+          <a href="#cv-import">CV import</a>
           <a href="#review">Applications</a>
           <a href="#safety">Approval</a>
         </nav>
@@ -367,6 +370,9 @@ function App() {
             <button type="button" aria-label="Dismiss message" onClick={() => setNotice(null)}>×</button>
           </div>
         )}
+
+        <CvImportPanel />
+        <DiscoveryPanel />
 
         <section className="metrics" id="tracker" aria-label="Application overview">
           <Metric label="Discovered" value={metrics.counts.DISCOVERED ?? 0} />

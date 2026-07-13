@@ -1,5 +1,9 @@
 # Local setup and deployment guide
 
+Start scheduled discovery locally with `docker compose --profile automation up --build`. The worker
+waits for API health and shares PostgreSQL. Production remains fail-closed until authentication and
+tenant ownership are implemented and reviewed.
+
 ## Deployment status
 
 The repository supports reproducible local development with Docker Compose or native tools.
@@ -160,3 +164,14 @@ and tests:
 - a reviewed release topology and image-signing/provenance process.
 
 The current Compose file is a local development topology, not a production manifest.
+
+## CV upload volume and backup
+
+Compose creates `cv_uploads` and mounts it at `/app/data/cv_uploads`; the image creates that path
+with ownership for its unprivileged `app` user. Native setup uses `backend/data/cv_uploads` unless
+`CV_STORAGE_PATH` is overridden. Keep this directory private and outside all static web roots.
+
+`docker compose down` preserves both database and CV volumes. `docker compose down -v` permanently
+removes both and is therefore a destructive reset. Back up and restore `postgres_data` and
+`cv_uploads` as one consistency unit. The default 30-day upload-file retention is enforced when a
+new upload starts, while database imports and approved profile snapshots remain until deleted.

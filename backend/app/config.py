@@ -24,6 +24,18 @@ class Settings(BaseSettings):
     ai_input_cost_per_million_usd: float = Field(default=0, ge=0)
     ai_cached_input_cost_per_million_usd: float = Field(default=0, ge=0)
     ai_output_cost_per_million_usd: float = Field(default=0, ge=0)
+    cv_storage_path: str = "./data/cv_uploads"
+    cv_max_upload_bytes: int = Field(default=10 * 1024 * 1024, ge=1024, le=25 * 1024 * 1024)
+    cv_max_pages: int = Field(default=40, ge=1, le=200)
+    cv_min_extracted_characters: int = Field(default=80, ge=1, le=5000)
+    cv_retention_days: int = Field(default=30, ge=1, le=3650)
+    cv_uploads_per_minute: int = Field(default=10, ge=1, le=120)
+    itjobs_api_key: SecretStr | None = None
+    infojobs_client_id: str | None = Field(default=None, max_length=200)
+    infojobs_client_secret: SecretStr | None = Field(default=None, repr=False)
+    discovery_provider_timeout_seconds: float = Field(default=15, gt=0, le=60)
+    discovery_max_provider_response_bytes: int = Field(default=2_000_000, ge=10_000, le=10_000_000)
+    discovery_scheduler_poll_seconds: int = Field(default=60, ge=15, le=3600)
     matching_permitted_countries: str = "ES,PT,IE"
     matching_allow_remote: bool = True
     matching_hard_reject_missing_required_skills: bool = False

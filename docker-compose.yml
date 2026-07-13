@@ -18,12 +18,32 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-jobagent}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/${POSTGRES_DB:-jobagent}
+      CV_STORAGE_PATH: /app/data/cv_uploads
     command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
     ports:
       - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
     depends_on:
       db:
         condition: service_healthy
+    volumes:
+      - cv_uploads:/app/data/cv_uploads
+
+  discovery-worker:
+    build: ./backend
+    profiles: ["automation"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-jobagent}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/${POSTGRES_DB:-jobagent}
+    command: python -m app.discovery_worker --poll-seconds 60
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
 
   web:
     build:
@@ -37,3 +57,4 @@ services:
 
 volumes:
   postgres_data:
+  cv_uploads:

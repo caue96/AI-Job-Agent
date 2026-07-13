@@ -1,5 +1,10 @@
 # Environment configuration
 
+Discovery runtime variables are `ITJOBS_API_KEY`, `INFOJOBS_CLIENT_ID`, `INFOJOBS_CLIENT_SECRET`,
+`DISCOVERY_PROVIDER_TIMEOUT_SECONDS`, `DISCOVERY_MAX_PROVIDER_RESPONSE_BYTES`, and
+`DISCOVERY_SCHEDULER_POLL_SECONDS`. Secrets are server-only, masked, and never persisted. A Tecnoempleo
+feed URL is a per-search, non-secret setting.
+
 The backend uses Pydantic Settings. Variable names are case-insensitive and are read from the
 process environment or a `.env` file in the backend's current working directory. Docker Compose
 loads the repository-root `.env` explicitly.
@@ -23,6 +28,12 @@ loads the repository-root `.env` explicitly.
 | `AI_INPUT_COST_PER_MILLION_USD` | `0` | Non-negative accounting rate used to estimate request cost. It does not control provider billing. |
 | `AI_CACHED_INPUT_COST_PER_MILLION_USD` | `0` | Non-negative cached-input accounting rate used when the provider reports cached tokens. |
 | `AI_OUTPUT_COST_PER_MILLION_USD` | `0` | Non-negative accounting rate used to estimate response cost. |
+| `CV_STORAGE_PATH` | `./data/cv_uploads` | Runtime directory for private generated PDF keys. Compose overrides it with `/app/data/cv_uploads`. Never place this under a static web root. |
+| `CV_MAX_UPLOAD_BYTES` | `10485760` | Streamed PDF size limit, from 1 KB through 25 MB. The UI advertises the default 10 MB limit. |
+| `CV_MAX_PAGES` | `40` | Maximum PDF page count, from 1 through 200. |
+| `CV_MIN_EXTRACTED_CHARACTERS` | `80` | Non-whitespace text below this threshold marks the PDF as likely scanned instead of invoking AI. |
+| `CV_RETENTION_DAYS` | `30` | Uploaded-file retention, from 1 through 3,650 days. Expired files are purged when an upload begins; records remain. |
+| `CV_UPLOADS_PER_MINUTE` | `10` | Per-user, process-local upload attempt limit, from 1 through 120. Suitable only for the local single-process release. |
 | `MATCHING_PERMITTED_COUNTRIES` | `ES,PT,IE` | Comma-separated two-letter alphabetic country codes, normalized and deduplicated at startup. |
 | `MATCHING_ALLOW_REMOTE` | `true` | Enables remote-work matching. |
 | `MATCHING_HARD_REJECT_MISSING_REQUIRED_SKILLS` | `false` | Converts missing recognized required skills into hard blockers. |
@@ -62,6 +73,7 @@ APP_ENV=development
 DATABASE_URL=sqlite:///./job_agent.db
 CORS_ORIGINS=http://localhost:5173
 AI_GENERATION_MODE=mock
+CV_STORAGE_PATH=./data/cv_uploads
 ```
 
 OpenAI development mode:

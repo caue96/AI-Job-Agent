@@ -1,0 +1,52 @@
+export type CvEvidence = { page: number; quote: string; method: "ai" | "deterministic" | "user" };
+export type CvValue = {
+  value: string | number | boolean | null;
+  confidence: number;
+  ambiguous: boolean;
+  evidence: CvEvidence[];
+};
+export type CvListValue = { value: string; confidence: number; evidence: CvEvidence[] };
+export type CvDraft = {
+  personal: Record<string, CvValue>;
+  headline: CvValue;
+  professional_summary: CvValue;
+  technical_skills: CvListValue[];
+  soft_skills: CvListValue[];
+  languages: CvListValue[];
+  employment: Record<string, unknown>[];
+  education: Record<string, unknown>[];
+  certifications: Record<string, unknown>[];
+  projects: Record<string, unknown>[];
+  achievements: CvListValue[];
+  citizenships: CvListValue[];
+  preferred_locations: CvListValue[];
+  preferred_titles: CvListValue[];
+  preferred_industries: CvListValue[];
+  workplace_preferences: CvListValue[];
+  salary_expectation: CvValue;
+  availability: CvValue;
+  declared_years_experience: CvValue;
+  calculated_years_experience: CvValue;
+  requires_sponsorship: CvValue;
+  relocation_available: CvValue;
+};
+export type CvImport = {
+  id: string;
+  status: string;
+  original_filename: string;
+  media_type: string;
+  size_bytes: number;
+  page_count: number | null;
+  draft: CvDraft | null;
+  validation: { scanned_likely?: boolean; unsupported_claims?: string[]; user_edited?: boolean };
+  model_metadata: Record<string, unknown>;
+  file_available: boolean;
+  created_at: string;
+  updated_at: string;
+};
+export type CvImportSummary = Pick<CvImport, "id" | "status" | "original_filename" | "size_bytes" | "page_count" | "file_available" | "created_at" | "updated_at">;
+export type CvComparison = {
+  profile_exists: boolean;
+  conflicts: { field: string; existing: unknown; imported: unknown }[];
+  additions: string[];
+};

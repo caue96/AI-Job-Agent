@@ -12,7 +12,9 @@ RUN pip install --no-cache-dir .
 COPY alembic ./alembic
 COPY alembic.ini ./
 
-RUN addgroup --system app && adduser --system --ingroup app app
+RUN addgroup --system app && adduser --system --ingroup app app \
+    && mkdir -p /app/data/cv_uploads \
+    && chown -R app:app /app/data
 USER app
 
 EXPOSE 8000

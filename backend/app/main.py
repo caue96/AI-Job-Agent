@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from sqlalchemy import select
@@ -10,15 +10,41 @@ from sqlalchemy.orm import Session
 
 from app.ai import AIProvider, build_provider
 from app.config import get_settings
+from app.cv import (
+    LocalCvStorage,
+    compare_import,
+    confirm_cv_import,
+    create_cv_import,
+    delete_cv_file,
+    delete_cv_import,
+    get_owned_import,
+    purge_expired_files,
+    serialize_import,
+    serialize_import_summary,
+    update_cv_draft,
+)
+from app.cv_ai import CvExtractionProvider, build_cv_provider
+from app.cv_schemas import (
+    CvComparison,
+    CvConfirmRequest,
+    CvDraftUpdate,
+    CvImportExport,
+    CvImportRead,
+    CvImportSummary,
+    CvProfileVersionRead,
+)
 from app.db import get_db
+from app.discovery_api import router as discovery_router
 from app.matching import MatchingPolicy
 from app.models import (
     Application,
     ApplicationStatusHistory,
     CandidateProfile,
+    CvImport,
     GeneratedDocument,
     GeneratedDocumentStatus,
     Job,
+    ProfileVersion,
 )
 from app.schemas import (
     ApplicationCreate,
@@ -56,9 +82,10 @@ app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=5)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.allowed_origins,
-    allow_methods=["GET", "POST", "PATCH"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
     allow_headers=["Authorization", "Content-Type"],
 )
+app.include_router(discovery_router)
 
 
 @lru_cache(maxsize=1)
@@ -69,6 +96,21 @@ def get_ai_provider() -> AIProvider:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
         ) from exc
+
+
+@lru_cache(maxsize=1)
+def get_cv_provider() -> CvExtractionProvider:
+    try:
+        return build_cv_provider(settings)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+
+
+@lru_cache(maxsize=1)
+def get_cv_storage() -> LocalCvStorage:
+    return LocalCvStorage(settings.cv_storage_path)
 
 
 def serialize_profile(profile: CandidateProfile) -> ProfileRead:
@@ -112,6 +154,146 @@ def update_profile(payload: ProfileUpdate, db: Session = Depends(get_db)) -> Pro
     write_audit(db, user.id, "profile.updated", "candidate_profile", profile.id)
     db.commit()
     return serialize_profile(profile)
+
+
+@app.delete("/v1/profiles/me", status_code=status.HTTP_204_NO_CONTENT, tags=["profiles"])
+def delete_profile(db: Session = Depends(get_db)) -> None:
+    user = current_development_user(db)
+    profile = db.scalar(
+        select(CandidateProfile).where(CandidateProfile.user_id == user.id).with_for_update()
+    )
+    if not profile:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Profile not found")
+    write_audit(db, user.id, "profile.deleted", "candidate_profile", profile.id)
+    db.delete(profile)
+    db.commit()
+
+
+@app.post(
+    "/v1/cv-imports",
+    response_model=CvImportRead,
+    status_code=status.HTTP_201_CREATED,
+    tags=["cv-imports"],
+)
+async def upload_cv(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    provider: CvExtractionProvider = Depends(get_cv_provider),
+    storage: LocalCvStorage = Depends(get_cv_storage),
+) -> CvImportRead:
+    user = current_development_user(db)
+    purge_expired_files(db, settings, storage)
+    record = await create_cv_import(db, file, user, settings, provider, storage)
+    db.commit()
+    db.refresh(record)
+    return serialize_import(record, storage)
+
+
+@app.get("/v1/cv-imports", response_model=list[CvImportSummary], tags=["cv-imports"])
+def list_cv_imports(
+    db: Session = Depends(get_db), storage: LocalCvStorage = Depends(get_cv_storage)
+) -> list[CvImportSummary]:
+    user = current_development_user(db)
+    records = list(
+        db.scalars(
+            select(CvImport).where(CvImport.user_id == user.id).order_by(CvImport.created_at.desc())
+        )
+    )
+    return [serialize_import_summary(record, storage) for record in records]
+
+
+@app.get("/v1/cv-imports/{import_id}", response_model=CvImportRead, tags=["cv-imports"])
+def get_cv_import(
+    import_id: str,
+    db: Session = Depends(get_db),
+    storage: LocalCvStorage = Depends(get_cv_storage),
+) -> CvImportRead:
+    user = current_development_user(db)
+    return serialize_import(get_owned_import(db, import_id, user.id), storage)
+
+
+@app.patch("/v1/cv-imports/{import_id}", response_model=CvImportRead, tags=["cv-imports"])
+def edit_cv_import(
+    import_id: str,
+    payload: CvDraftUpdate,
+    db: Session = Depends(get_db),
+    storage: LocalCvStorage = Depends(get_cv_storage),
+) -> CvImportRead:
+    user = current_development_user(db)
+    record = get_owned_import(db, import_id, user.id, lock=True)
+    update_cv_draft(db, record, payload.draft, user)
+    db.commit()
+    db.refresh(record)
+    return serialize_import(record, storage)
+
+
+@app.get("/v1/cv-imports/{import_id}/compare", response_model=CvComparison, tags=["cv-imports"])
+def compare_cv_import(import_id: str, db: Session = Depends(get_db)) -> CvComparison:
+    user = current_development_user(db)
+    return compare_import(db, get_owned_import(db, import_id, user.id), user)
+
+
+@app.post(
+    "/v1/cv-imports/{import_id}/confirm",
+    response_model=CvProfileVersionRead,
+    tags=["cv-imports"],
+)
+def confirm_cv_import_route(
+    import_id: str, payload: CvConfirmRequest, db: Session = Depends(get_db)
+) -> ProfileVersion:
+    user = current_development_user(db)
+    record = get_owned_import(db, import_id, user.id, lock=True)
+    _, version = confirm_cv_import(db, record, user, payload.strategy, payload.accept_conflicts)
+    db.commit()
+    db.refresh(version)
+    return version
+
+
+@app.get("/v1/cv-imports/{import_id}/export", response_model=CvImportExport, tags=["cv-imports"])
+def export_cv_import(
+    import_id: str,
+    db: Session = Depends(get_db),
+    storage: LocalCvStorage = Depends(get_cv_storage),
+) -> CvImportExport:
+    user = current_development_user(db)
+    record = get_owned_import(db, import_id, user.id)
+    versions = list(
+        db.scalars(
+            select(ProfileVersion)
+            .where(ProfileVersion.cv_import_id == record.id, ProfileVersion.user_id == user.id)
+            .order_by(ProfileVersion.version)
+        )
+    )
+    return CvImportExport(
+        import_record=serialize_import(record, storage),
+        versions=[CvProfileVersionRead.model_validate(version) for version in versions],
+    )
+
+
+@app.delete(
+    "/v1/cv-imports/{import_id}/file", status_code=status.HTTP_204_NO_CONTENT, tags=["cv-imports"]
+)
+def remove_cv_file(
+    import_id: str,
+    db: Session = Depends(get_db),
+    storage: LocalCvStorage = Depends(get_cv_storage),
+) -> None:
+    user = current_development_user(db)
+    delete_cv_file(db, get_owned_import(db, import_id, user.id, lock=True), user, storage)
+    db.commit()
+
+
+@app.delete(
+    "/v1/cv-imports/{import_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["cv-imports"]
+)
+def remove_cv_import(
+    import_id: str,
+    db: Session = Depends(get_db),
+    storage: LocalCvStorage = Depends(get_cv_storage),
+) -> None:
+    user = current_development_user(db)
+    delete_cv_import(db, get_owned_import(db, import_id, user.id, lock=True), user, storage)
+    db.commit()
 
 
 @app.post("/v1/jobs", response_model=JobRead, status_code=status.HTTP_201_CREATED, tags=["jobs"])

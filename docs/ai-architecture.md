@@ -212,3 +212,23 @@ precision, fallback rate, latency percentiles, token counts, and cost per valid 
   object is available from the failed call.
 - No live-model evaluation corpus or production rate-limit budget exists in the local-only v1.0
   product.
+
+## Prompt: grounded CV extraction v1
+
+`grounded-cv-extraction-v1` exists only to map already extracted PDF text into the strict,
+evidence-bearing `CvProfileDraft` schema. Deterministic code first identifies likely section pages;
+the provider then receives escaped JSON containing section hints and page-numbered text. Its
+developer instruction treats the entire document as untrusted data, forbids inference,
+embellishment, translation, and completion, requires null for absent facts, and requires an exact
+quote and page for every non-null value.
+
+Application code is the factual boundary: it verifies each quote with an exact substring lookup and
+drops the claim if verification fails. It separately normalizes and deduplicates data and calculates
+overlap-safe experience. Review edits are labelled `method=user`; they are never misrepresented as
+AI-extracted. The provider cannot save a profile, select merge/replace, or advance beyond review.
+
+The CV prompt uses one request after deterministic section detection rather than multiple expensive
+requests. Output uses the existing configured model, retry, timeout, reasoning, and maximum-token
+settings, with a minimum practical structured-output allowance and a hard 4,000-token ceiling.
+Provider ID, model, prompt version, input/output tokens, and latency are saved; PDF text and prompts
+are not logged. The mock parser is deterministic and all automated tests avoid live providers.

@@ -1,5 +1,20 @@
 # Test coverage report
 
+## Discovery feature measurement
+
+The complete backend suite reports 86% branch-aware coverage overall and 98% across
+`app/ai.py`, `app/matching.py`, and `app/services.py`, exceeding the 80%/90% gates. Discovery's core
+orchestrator is 75%, provider adapters 72%, schemas 91%, and HTTP route wiring 46%. The worker CLI is
+0% because it is a thin infinite-loop/transaction wrapper; its scheduling service is tested directly and
+the real worker is covered by the Compose smoke test. Remaining route branches are repetitive 404/422
+serialization paths. Live network branches remain unexecuted by design: deterministic tests must never
+contact job sites.
+
+Discovery tests cover multilingual term generation, provider queries and normalization, RSS parsing,
+pagination decisions, retry/rate metadata, SSRF and malicious URLs, HTML sanitization, CSV/email imports,
+weekday scheduling, partial failure, duplicate merging, matching, ranked results, application preparation,
+notification deduplication, and the complete CV-to-strong-match browser journey.
+
 Date: 2026-07-12
 
 ## Coverage policy
@@ -44,15 +59,18 @@ coverage report --include='app/ai.py,app/matching.py,app/services.py' --fail-und
 | `app/ai.py` | 100% |
 | `app/matching.py` | 97% |
 | `app/services.py` | 98% |
-| `app/main.py` | 93% |
-| `app/config.py` | 97% |
+| `app/cv.py` | 87% |
+| `app/cv_ai.py` | 93% |
+| `app/cv_schemas.py` | 100% |
+| `app/main.py` | 94% |
+| `app/config.py` | 98% |
 | `app/db.py` | 97% |
 | `app/models.py` | 100% |
 | `app/schemas.py` | 96% |
-| **Overall** | **97.52%** |
+| **Overall** | **95.00%** |
 | **Business logic aggregate** | **98%** |
 
-The verified run executed **72 deterministic tests**. No snapshot tests were introduced.
+The verified run executed **89 deterministic tests**. No snapshot tests were introduced.
 
 ## Tests added
 
@@ -120,9 +138,16 @@ not counted as unit-test business coverage.
 
 ### Frontend coverage
 
-The frontend remains verified by TypeScript compilation, ESLint, and production builds, but it
-does not yet produce a line-coverage percentage. Adding a browser/unit-test stack solely to
-raise the repository-wide number would be misleading for the current single-screen client.
-When frontend interaction logic grows, deterministic component tests should cover request
-cancellation, local mutation updates, filtering, and approval-button state before a separate
-frontend threshold is introduced.
+The frontend does not yet produce a line-coverage percentage. It is verified by TypeScript,
+ESLint, production build, and a deterministic Playwright test that mocks the API and exercises PDF
+selection, upload, grounded review, editing, draft save, explicit confirmation, and success state.
+The existing application tracker still relies on compile/lint/build and backend E2E coverage; add
+component coverage before setting a frontend percentage threshold.
+
+### CV-specific deterministic coverage
+
+Backend tests cover valid extraction through profile version save, exact-evidence rejection,
+review-provenance relabelling, deduplication, overlap-safe experience, path traversal guards,
+rate limiting, retention, MIME/extension/signature/empty/corrupt/encrypted/scanned failures,
+generated filename collisions, merge conflicts, deletion, export, and ownership scoping. PDF
+fixtures are generated in memory and no test calls an AI provider.

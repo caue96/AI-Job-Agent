@@ -1,5 +1,21 @@
 # API reference
 
+The `/v1/discovery` API covers provider status, generated/edited search profiles, configurations,
+manual and scheduled runs, manual/CSV/email imports, ranked matches, actions, and notifications. All
+records are scoped through the current-user dependency. See [job-discovery.md](job-discovery.md).
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/v1/discovery/providers` | Compliance classification, implementation, configuration, health, and safe error state. |
+| `POST/GET/PUT` | `/v1/discovery/search-profile...` | Generate from the approved CV, read, or replace reviewed preferences. |
+| `POST/GET/PUT` | `/v1/discovery/configurations...` | Create, list, or replace hard filters, providers, and schedules. |
+| `POST/GET` | `/v1/discovery/search-runs` | Execute a manual search or read scoped history. |
+| `POST` | `/v1/discovery/scheduler/tick` | Execute currently due configurations idempotently. |
+| `POST` | `/v1/discovery/imports/manual|csv|email` | Import user-authorized vacancy content without scraping. |
+| `GET` | `/v1/discovery/matches` | Ranked canonical jobs with score, location, provider, role, seniority, workplace, salary, language, date, authorization, sponsorship, and recommendation filters. |
+| `GET/POST` | `/v1/discovery/matches/{id}...` | Detailed analysis or explicit save/reject/prepare action. |
+| `GET/POST` | `/v1/discovery/notifications...` | Read in-app events or mark one read. |
+
 The FastAPI service exposes JSON endpoints under `/v1`. Interactive OpenAPI documentation is
 available at `/docs` and the machine-readable schema at `/openapi.json` while the API runs.
 
@@ -134,3 +150,31 @@ stateDiagram-v2
 Transition requests use `{"to_status":"STATUS","reason":"optional","approved_by_user":false}`.
 Both `READY_TO_SUBMIT` and `SUBMITTED` require `approved_by_user=true`. The transition, status
 history, and audit metadata are written in the same database transaction.
+
+## PDF CV import contract
+
+All routes use the current-user dependency. Raw page text, storage keys, and document hashes are
+never returned by normal read responses.
+
+| Method and path | Contract |
+| --- | --- |
+| `POST /v1/cv-imports` | Multipart field `file`; validates and processes one PDF. Returns 201 with the review draft, or a scanned-document `TEXT_EXTRACTED` result. |
+| `GET /v1/cv-imports` | Newest-first import summaries. |
+| `GET /v1/cv-imports/{id}` | Status, safe metadata, validation, model metadata, and the grounded draft. This is also the status/result polling endpoint. |
+| `PATCH /v1/cv-imports/{id}` | Body `{"draft": CvProfileDraft}`. Allowed only during `AWAITING_REVIEW`; non-grounded edits are relabelled as user-confirmed. |
+| `GET /v1/cv-imports/{id}/compare` | Existing-profile conflicts and additive skills. |
+| `POST /v1/cv-imports/{id}/confirm` | Body `{"strategy":"merge|replace","accept_conflicts":false}`. Creates a profile version and returns it. |
+| `GET /v1/cv-imports/{id}/export` | Import metadata/draft plus approved versions as portable JSON. |
+| `DELETE /v1/cv-imports/{id}/file` | Deletes only the stored PDF; returns 204. |
+| `DELETE /v1/cv-imports/{id}` | Deletes the import and stored PDF; approved profile data remains; returns 204. |
+
+`DELETE /v1/profiles/me` deletes the normalized profile and its approved profile-version snapshots;
+CV import records remain until individually deleted, allowing the user to choose the scope of data
+deletion. Existing application tracking records are not silently deleted.
+
+`CvProfileDraft` covers personal/contact details, headline, summary, technical and soft skills,
+languages, employment, education, certifications, projects, achievements, preferences, salary,
+availability, work authorization, sponsorship, relocation, and declared/calculated experience.
+Every scalar carries `value`, `confidence`, `ambiguous`, and `evidence`; list facts carry value,
+confidence, and evidence. Evidence has `page`, exact `quote`, and `method` (`ai`, `deterministic`,
+or `user`). See [`cv-import.md`](cv-import.md) for error and state semantics.
