@@ -13,7 +13,7 @@ COPY alembic ./alembic
 COPY alembic.ini ./
 
 RUN addgroup --system app && adduser --system --ingroup app app \
-    && mkdir -p /app/data/cv_uploads \
+    && mkdir -p /app/data/cv_uploads /app/data/cv_exports \
     && chown -R app:app /app/data
 USER app
 

@@ -20,6 +20,10 @@ Phases 2–6 are implemented:
 - secure PDF CV upload, extraction, evidence review, merge/replace, and profile version history;
 - compliant job discovery through documented APIs/public feeds and user-authorized imports, with
   multilingual search profiles, duplicate merging, schedules, explainable rankings, and notifications;
+- evidence-grounded job-specific CV recommendations, user review, immutable variants, and private
+  PDF/DOCX exports;
+- complete evidence-grounded cover letters in English, Spanish, or Portuguese, with differentiated
+  variants, immutable edits, claim validation, explicit approval, and private TXT/DOCX/PDF exports;
 - security, performance, coverage, migration, and dependency quality gates.
 
 Version 1.0 is a local-only release. Authentication and tenant isolation are not implemented,
@@ -28,6 +32,10 @@ networks.
 
 Provider access decisions, scheduling, imports, retention, and troubleshooting are documented in
 [`docs/job-discovery.md`](docs/job-discovery.md).
+CV recommendation grounding, review, variants, and exports are documented in
+[`docs/cv-optimization.md`](docs/cv-optimization.md).
+Cover-letter grounding, review, approval, exports, and limitations are documented in
+[`docs/cover-letters.md`](docs/cover-letters.md).
 
 ## Prerequisites
 
@@ -119,6 +127,7 @@ pnpm audit --audit-level high
 - [Provider integration](docs/providers.md)
 - [AI architecture and prompt registry](docs/ai-architecture.md)
 - [CV import workflow and operations](docs/cv-import.md)
+- [Grounded cover-letter workflow](docs/cover-letters.md)
 - [Roadmap and limitations](docs/roadmap.md)
 - [Production-readiness review](docs/production-readiness-review.md)
 - [Security audit](docs/security-audit.md)

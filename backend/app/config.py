@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     ai_cached_input_cost_per_million_usd: float = Field(default=0, ge=0)
     ai_output_cost_per_million_usd: float = Field(default=0, ge=0)
     cv_storage_path: str = "./data/cv_uploads"
+    cv_export_storage_path: str = "./data/cv_exports"
     cv_max_upload_bytes: int = Field(default=10 * 1024 * 1024, ge=1024, le=25 * 1024 * 1024)
     cv_max_pages: int = Field(default=40, ge=1, le=200)
     cv_min_extracted_characters: int = Field(default=80, ge=1, le=5000)

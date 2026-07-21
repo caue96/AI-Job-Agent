@@ -464,6 +464,9 @@ def sponsorship_claim(text: str) -> bool | None:
     normalized_text = text.casefold()
     if not re.search(r"\b(?:sponsorship|patroc[ií]nio)\b", normalized_text):
         return None
+    explicit_value = re.search(r"\brequires sponsorship\s*:\s*(true|false)\b", normalized_text)
+    if explicit_value:
+        return explicit_value.group(1) == "true"
     negative_patterns = (
         r"\b(?:do not|don't|does not|doesn't|no)\b[^.]{0,40}\bsponsorship\b",
         r"\bno\b[^.]{0,20}\b(?:necesito|necesita|requiero|requiere)\b[^.]{0,30}\bpatrocinio\b",

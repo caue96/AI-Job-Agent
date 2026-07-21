@@ -16,6 +16,44 @@ records are scoped through the current-user dependency. See [job-discovery.md](j
 | `GET/POST` | `/v1/discovery/matches/{id}...` | Detailed analysis or explicit save/reject/prepare action. |
 | `GET/POST` | `/v1/discovery/notifications...` | Read in-app events or mark one read. |
 
+The `/v1/cv-optimizations` API requires a confirmed CV profile version and an existing deterministic
+discovery match for the selected job.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/v1/cv-optimizations/analyses` | Create an evidence-grounded analysis for `{job_id}`. |
+| `GET` | `/v1/cv-optimizations/analyses...` | List or read user-owned analyses and recommendations. |
+| `PATCH` | `/v1/cv-optimizations/recommendations/{id}` | Accept, reject, or edit one recommendation. |
+| `POST` | `/v1/cv-optimizations/analyses/{id}/recommendations/batch` | Accept safe edits or reset decisions. |
+| `POST` | `/v1/cv-optimizations/analyses/{id}/preview` | Preview the revised CV without saving a variant. |
+| `POST` | `/v1/cv-optimizations/analyses/{id}/variants` | Save an immutable job-specific CV variant. |
+| `GET` | `/v1/cv-optimizations/variants...` | List, read, or compare user-owned variants. |
+| `DELETE` | `/v1/cv-optimizations/variants/{id}` | Delete a variant and its export files. |
+| `POST` | `/v1/cv-optimizations/variants/{id}/exports` | Render a validated `pdf` or `docx`. |
+| `GET` | `/v1/cv-optimizations/exports/{id}/download` | Download a user-owned export. |
+
+The `/v1/cover-letters` API requires an approved CV profile version and a deterministic discovery
+match. Generation prepares an application if necessary, but never submits it.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/v1/cover-letters` | Generate one to three grounded variants for a job. |
+| `GET` | `/v1/cover-letters?job_id=...` | List scoped immutable versions, newest first. |
+| `GET` | `/v1/cover-letters/{id}` | Read content, validation, evidence, lineage, and provider metadata. |
+| `PATCH` | `/v1/cover-letters/{id}` | Save greeting/paragraph/closing edits as a new version. |
+| `POST` | `/v1/cover-letters/{id}/validate` | Re-run deterministic claim validation. |
+| `POST` | `/v1/cover-letters/{id}/select` | Select one user-owned variant/version. |
+| `POST` | `/v1/cover-letters/{id}/approve` | Explicitly approve a valid version. |
+| `POST` | `/v1/cover-letters/{id}/regenerate` | Generate from the stored configuration. |
+| `DELETE` | `/v1/cover-letters/{id}` | Delete an unapproved draft and private files. |
+| `POST` | `/v1/cover-letters/{id}/exports` | Idempotently render approved TXT, DOCX, or PDF. |
+| `GET` | `/v1/cover-letters/exports/{id}/download` | Download a user-owned export. |
+
+Generation accepts `job_id`, optional language (`en`, `es`, `pt`), tone, length, variants,
+greeting/closing preferences, inclusion switches, and excluded evidence IDs. A custom manager name
+requires `hiring_manager_verified=true`. Invalid claims are returned with issue codes and cannot be
+approved. See [cover-letters.md](cover-letters.md) for the lifecycle and constraints.
+
 The FastAPI service exposes JSON endpoints under `/v1`. Interactive OpenAPI documentation is
 available at `/docs` and the machine-readable schema at `/openapi.json` while the API runs.
 

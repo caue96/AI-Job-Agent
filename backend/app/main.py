@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.ai import AIProvider, build_provider
 from app.config import get_settings
+from app.cover_letter_api import router as cover_letter_router
 from app.cv import (
     LocalCvStorage,
     compare_import,
@@ -24,6 +25,7 @@ from app.cv import (
     update_cv_draft,
 )
 from app.cv_ai import CvExtractionProvider, build_cv_provider
+from app.cv_optimization_api import router as cv_optimization_router
 from app.cv_schemas import (
     CvComparison,
     CvConfirmRequest,
@@ -86,6 +88,8 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type"],
 )
 app.include_router(discovery_router)
+app.include_router(cv_optimization_router)
+app.include_router(cover_letter_router)
 
 
 @lru_cache(maxsize=1)
@@ -426,7 +430,10 @@ def list_generated_documents(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Application not found")
     statement = (
         select(GeneratedDocument)
-        .where(GeneratedDocument.application_id == application.id)
+        .where(
+            GeneratedDocument.application_id == application.id,
+            GeneratedDocument.document_type == "APPLICATION_PACKAGE",
+        )
         .order_by(GeneratedDocument.version.desc())
     )
     if latest_valid:

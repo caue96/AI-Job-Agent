@@ -19,6 +19,7 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-jobagent}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/${POSTGRES_DB:-jobagent}
       CV_STORAGE_PATH: /app/data/cv_uploads
+      CV_EXPORT_STORAGE_PATH: /app/data/cv_exports
     command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
     ports:
       - "127.0.0.1:8000:8000"
@@ -32,6 +33,7 @@ services:
         condition: service_healthy
     volumes:
       - cv_uploads:/app/data/cv_uploads
+      - cv_exports:/app/data/cv_exports
 
   discovery-worker:
     build: ./backend
@@ -58,3 +60,4 @@ services:
 volumes:
   postgres_data:
   cv_uploads:
+  cv_exports:

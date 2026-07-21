@@ -29,6 +29,7 @@ loads the repository-root `.env` explicitly.
 | `AI_CACHED_INPUT_COST_PER_MILLION_USD` | `0` | Non-negative cached-input accounting rate used when the provider reports cached tokens. |
 | `AI_OUTPUT_COST_PER_MILLION_USD` | `0` | Non-negative accounting rate used to estimate response cost. |
 | `CV_STORAGE_PATH` | `./data/cv_uploads` | Runtime directory for private generated PDF keys. Compose overrides it with `/app/data/cv_uploads`. Never place this under a static web root. |
+| `CV_EXPORT_STORAGE_PATH` | `./data/cv_exports` | Runtime directory for private job-specific CV and cover-letter TXT/PDF/DOCX exports. Compose mounts `/app/data/cv_exports`. Never place this under a static web root. |
 | `CV_MAX_UPLOAD_BYTES` | `10485760` | Streamed PDF size limit, from 1 KB through 25 MB. The UI advertises the default 10 MB limit. |
 | `CV_MAX_PAGES` | `40` | Maximum PDF page count, from 1 through 200. |
 | `CV_MIN_EXTRACTED_CHARACTERS` | `80` | Non-whitespace text below this threshold marks the PDF as likely scanned instead of invoking AI. |
@@ -74,6 +75,7 @@ DATABASE_URL=sqlite:///./job_agent.db
 CORS_ORIGINS=http://localhost:5173
 AI_GENERATION_MODE=mock
 CV_STORAGE_PATH=./data/cv_uploads
+CV_EXPORT_STORAGE_PATH=./data/cv_exports
 ```
 
 OpenAI development mode:

@@ -38,9 +38,22 @@ version allocation and persistence. No queue, worker, Redis, or shared cache exi
 | `app/cv.py` | PDF validation/storage, extraction, grounding, normalization, comparison, retention, and profile persistence |
 | `app/cv_ai.py` | Strict CV extraction providers, prompt boundary, deterministic parser, and fallback |
 | `app/cv_schemas.py` | Evidence-bearing CV draft, comparison, import, and version contracts |
+| `app/cv_optimization_ai.py` | Structured recommendation provider, fact catalog, prompt boundary, and claim validator |
+| `app/cv_optimization.py` | User-scoped analysis, decisions, preview, immutable variants, and comparison |
+| `app/cv_exports.py` | Deterministic DOCX/PDF rendering and private traversal-safe storage |
+| `app/cover_letter_ai.py` | Strict evidence-plan provider, prompt boundary, fallback, and verified company facts |
+| `app/cover_letters.py` | Language/greeting resolution, deterministic prose, claim validation, versioning, and approval |
+| `app/cover_letter_api.py` | Thin user-scoped cover-letter and private export routes |
 | `app/schemas.py` | Strict request validation and public response contracts |
 | `app/models.py` | SQLAlchemy tables, relationships, constraints, and indexes |
 | `app/config.py` | Typed environment configuration and production fail-closed guard |
+
+Cover letters reuse the existing application, approved profile version, deterministic match, AI
+settings, audit service, and private export storage. `GeneratedDocument.document_type` separates
+legacy application packages from `COVER_LETTER` records without duplicating persistence. Edited
+letters point to `parent_document_id`; `DocumentExport` owns format-specific storage metadata. The
+service commits before the provider call and then revalidates job, profile, match, and application
+identity before allocating versions under a row lock.
 
 ## Deterministic matching
 
@@ -85,6 +98,16 @@ erDiagram
   USERS ||--o{ DISCOVERY_NOTIFICATIONS : receives
   APPLICATIONS ||--o{ APPLICATION_STATUS_HISTORY : records
   APPLICATIONS ||--o{ GENERATED_DOCUMENTS : versions
+  USERS ||--o{ CV_ANALYSIS_RUNS : owns
+  PROFILE_VERSIONS ||--o{ CV_ANALYSIS_RUNS : grounds
+  JOBS ||--o{ CV_ANALYSIS_RUNS : targets
+  CV_ANALYSIS_RUNS ||--o{ CV_RECOMMENDATIONS : proposes
+  CV_RECOMMENDATIONS ||--o{ CV_RECOMMENDATION_EVIDENCE : cites
+  CV_RECOMMENDATIONS ||--o{ CV_RECOMMENDATION_DECISIONS : reviews
+  CV_ANALYSIS_RUNS ||--o| CV_VARIANTS : produces
+  CV_VARIANTS ||--o{ CV_VARIANT_VERSIONS : versions
+  CV_VARIANT_VERSIONS ||--o| CV_VARIANT_VALIDATIONS : validates
+  CV_VARIANT_VERSIONS ||--o{ CV_EXPORTS : exports
 ```
 
 Jobs are deduplicated by unique source/external ID, normalized URL, and a stable content hash.
@@ -118,3 +141,18 @@ validated at the API boundary and never interpolated into SQL or system/develope
 - There is no shared response cache; mutable user data is read directly from the database.
 - The frontend remains a single-screen application; critical CV and discovery journeys have browser
   tests, but component-level coverage is not measured separately.
+
+## Job-specific CV variant flow
+
+```mermaid
+flowchart LR
+    P["Immutable approved ProfileVersion"] --> F["Evidence fact catalog"]
+    J["Normalized job and deterministic match"] --> A["Structured recommendation planner"]
+    F --> A
+    A --> V["Deterministic grounding validator"]
+    V --> R["User review and append-only decisions"]
+    R --> C["Immutable CV variant version"]
+    C --> E["Private PDF or DOCX export"]
+```
+
+See [cv-optimization.md](cv-optimization.md) for validation, lifecycle, and export contracts.

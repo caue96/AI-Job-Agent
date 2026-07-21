@@ -38,6 +38,14 @@ Dates are normalized only when parseable as `YYYY` or `YYYY-MM`. Duplicate list 
 case-insensitively. Calculated experience uses the union of covered months, so overlapping jobs are
 not double counted. Declared and calculated experience remain separate in the version snapshot.
 
+## Master and job-specific versions
+
+Confirmed imports create immutable master `ProfileVersion` snapshots. Job-specific optimization
+never edits these records: it deep-copies one approved snapshot into a separately versioned
+`CvVariant`. Users preview the copy, explicitly save it, and can export it without changing future
+matching inputs. See [cv-optimization.md](cv-optimization.md) for the complete review and variant
+lifecycle.
+
 ## Storage, privacy, and retention
 
 `LocalCvStorage` is rooted at `CV_STORAGE_PATH`. It accepts generated `<uuid>.pdf` keys only and

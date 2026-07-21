@@ -165,13 +165,20 @@ and tests:
 
 The current Compose file is a local development topology, not a production manifest.
 
-## CV upload volume and backup
+## CV file volumes and backup
 
 Compose creates `cv_uploads` and mounts it at `/app/data/cv_uploads`; the image creates that path
 with ownership for its unprivileged `app` user. Native setup uses `backend/data/cv_uploads` unless
 `CV_STORAGE_PATH` is overridden. Keep this directory private and outside all static web roots.
+Job-specific PDF and DOCX files use the separate `cv_exports` volume at
+`/app/data/cv_exports`; native setup uses `backend/data/cv_exports` unless
+`CV_EXPORT_STORAGE_PATH` is overridden. Approved cover-letter TXT, DOCX, and PDF exports reuse this
+private volume and the same user-scoped download boundary.
 
-`docker compose down` preserves both database and CV volumes. `docker compose down -v` permanently
-removes both and is therefore a destructive reset. Back up and restore `postgres_data` and
-`cv_uploads` as one consistency unit. The default 30-day upload-file retention is enforced when a
-new upload starts, while database imports and approved profile snapshots remain until deleted.
+`docker compose down` preserves the database and both CV volumes. `docker compose down -v`
+permanently removes all three and is therefore a destructive reset. Back up and restore
+`postgres_data`, `cv_uploads`, and `cv_exports` as one consistency unit. The default 30-day
+upload-file retention is enforced when a new upload starts, while database imports and approved
+profile snapshots remain until deleted. Export files are deleted with their owning CV variant.
+Unapproved cover-letter exports are deleted with their draft; approved/exported cover letters are
+retained as audit records.

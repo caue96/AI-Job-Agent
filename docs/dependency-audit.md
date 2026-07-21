@@ -1,6 +1,6 @@
 # Dependency audit
 
-Audit date: 2026-07-12
+Audit date: 2026-07-20
 
 ## Method and result
 
@@ -34,7 +34,9 @@ future advisory will be published. CI reruns both audits on every push and pull 
 | pydantic-settings | `>=2.14.2,<3` | Typed environment and `.env` loading. | MIT | None found |
 | Psycopg with binary extra | `>=3.3.4,<4` | PostgreSQL SQLAlchemy driver used by the Compose database URL; the binary extra provides local wheels. | LGPL-3.0-only | None found |
 | pypdf | `>=6.13.3,<7` | Maintained direct-text PDF reader used for bounded page extraction and encrypted/corrupt detection; it does not execute embedded content. | BSD-3-Clause | None found |
+| python-docx | `>=1.2.0,<2` | Deterministic editable DOCX rendering for validated CV variants. | MIT | None found |
 | python-multipart | `>=0.0.31,<0.0.32` | FastAPI multipart parser required for the single streamed CV file field. Version 0.0.31 fixes CVE-2026-40347, CVE-2026-42561, CVE-2026-53538, CVE-2026-53539, and CVE-2026-53540; the upper bound avoids the incompatible 0.0.32 namespace layout observed with the current FastAPI runtime. | Apache-2.0 | None in the allowed range |
+| reportlab | `>=4.4.10,<5` | Deterministic PDF rendering for validated CV variants without a browser/HTML renderer. | BSD-3-Clause | None found |
 | SQLAlchemy | `>=2.0.51,<3` | ORM models, sessions, transactions, row locking, and parameterized queries. | MIT | None found |
 | Uvicorn with standard extra | `>=0.51,<1` | ASGI server used by native setup and the API container; standard extras provide production event-loop/protocol support. | BSD-3-Clause | None found |
 

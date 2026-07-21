@@ -47,6 +47,15 @@ class GeneratedDocumentStatus(enum.StrEnum):
     INVALID = "INVALID"
 
 
+class CoverLetterStatus(enum.StrEnum):
+    DRAFT = "DRAFT"
+    GENERATED = "GENERATED"
+    VALIDATED = "VALIDATED"
+    USER_EDITED = "USER_EDITED"
+    APPROVED = "APPROVED"
+    EXPORTED = "EXPORTED"
+
+
 class CvImportStatus(enum.StrEnum):
     PDF_SELECTED = "PDF_SELECTED"
     PDF_VALIDATED = "PDF_VALIDATED"
@@ -63,6 +72,30 @@ class DiscoveryRunStatus(enum.StrEnum):
     PARTIAL = "PARTIAL"
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
+
+
+class CvOptimizationStatus(enum.StrEnum):
+    CV_ANALYSIS_REQUESTED = "CV_ANALYSIS_REQUESTED"
+    GAP_ANALYSIS_COMPLETED = "GAP_ANALYSIS_COMPLETED"
+    IMPROVEMENTS_PROPOSED = "IMPROVEMENTS_PROPOSED"
+    AWAITING_REVIEW = "AWAITING_REVIEW"
+    RECOMMENDATIONS_APPROVED = "RECOMMENDATIONS_APPROVED"
+    CV_VARIANT_GENERATED = "CV_VARIANT_GENERATED"
+    CV_VARIANT_SAVED = "CV_VARIANT_SAVED"
+
+
+class CvRecommendationDecisionValue(enum.StrEnum):
+    PENDING = "PENDING"
+    ACCEPTED = "ACCEPTED"
+    REJECTED = "REJECTED"
+    EDITED = "EDITED"
+
+
+class CvVariantStatus(enum.StrEnum):
+    JOB_SPECIFIC_DRAFT = "JOB_SPECIFIC_DRAFT"
+    USER_REVIEWED = "USER_REVIEWED"
+    APPROVED = "APPROVED"
+    EXPORTED = "EXPORTED"
 
 
 class User(Base):
@@ -288,6 +321,18 @@ class GeneratedDocument(Base):
     __tablename__ = "generated_documents"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
     application_id: Mapped[str] = mapped_column(ForeignKey("applications.id"), index=True)
+    document_type: Mapped[str] = mapped_column(
+        String(30), default="APPLICATION_PACKAGE", index=True
+    )
+    job_id: Mapped[str | None] = mapped_column(
+        ForeignKey("jobs.id", ondelete="CASCADE"), index=True
+    )
+    profile_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("profile_versions.id", ondelete="RESTRICT"), index=True
+    )
+    parent_document_id: Mapped[str | None] = mapped_column(
+        ForeignKey("generated_documents.id", ondelete="SET NULL"), index=True
+    )
     version: Mapped[int] = mapped_column(Integer)
     language: Mapped[str] = mapped_column(String(2))
     status: Mapped[GeneratedDocumentStatus] = mapped_column(Enum(GeneratedDocumentStatus))
@@ -301,8 +346,34 @@ class GeneratedDocument(Base):
     output_tokens: Mapped[int | None] = mapped_column(Integer)
     estimated_cost_usd: Mapped[float | None] = mapped_column(nullable=True)
     latency_ms: Mapped[int | None] = mapped_column(Integer)
+    cover_letter_status: Mapped[CoverLetterStatus | None] = mapped_column(
+        Enum(CoverLetterStatus), index=True
+    )
+    variant: Mapped[str | None] = mapped_column(String(30))
+    tone: Mapped[str | None] = mapped_column(String(30))
+    length: Mapped[str | None] = mapped_column(String(20))
+    configuration_json: Mapped[dict] = mapped_column("configuration", JSON, default=dict)
+    selected: Mapped[bool] = mapped_column(Boolean, default=False)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    approved_by: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     __table_args__ = (UniqueConstraint("application_id", "version", name="uq_document_version"),)
+
+
+class DocumentExport(Base):
+    __tablename__ = "document_exports"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    generated_document_id: Mapped[str] = mapped_column(
+        ForeignKey("generated_documents.id", ondelete="CASCADE"), index=True
+    )
+    format: Mapped[str] = mapped_column(String(10))
+    storage_key: Mapped[str] = mapped_column(String(100), unique=True)
+    sha256: Mapped[str] = mapped_column(String(64))
+    size_bytes: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    __table_args__ = (
+        UniqueConstraint("generated_document_id", "format", name="uq_document_export_format"),
+    )
 
 
 class AuditLog(Base):
@@ -498,3 +569,159 @@ class DiscoveryNotification(Base):
     __table_args__ = (
         UniqueConstraint("user_id", "deduplication_key", name="uq_notification_dedup"),
     )
+
+
+class CvAnalysisRun(Base):
+    __tablename__ = "cv_analysis_runs"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    profile_version_id: Mapped[str] = mapped_column(
+        ForeignKey("profile_versions.id", ondelete="RESTRICT"), index=True
+    )
+    job_id: Mapped[str] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), index=True)
+    match_result_id: Mapped[str] = mapped_column(
+        ForeignKey("discovery_match_results.id", ondelete="CASCADE"), index=True
+    )
+    status: Mapped[CvOptimizationStatus] = mapped_column(Enum(CvOptimizationStatus), index=True)
+    original_score: Mapped[int] = mapped_column(Integer)
+    input_summary: Mapped[dict] = mapped_column(JSON, default=dict)
+    validation: Mapped[dict] = mapped_column(JSON, default=dict)
+    prompt_version: Mapped[str] = mapped_column(String(60))
+    model: Mapped[str] = mapped_column(String(100))
+    provider_response_id: Mapped[str | None] = mapped_column(String(100))
+    input_tokens: Mapped[int | None] = mapped_column(Integer)
+    output_tokens: Mapped[int | None] = mapped_column(Integer)
+    latency_ms: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+    __table_args__ = (Index("ix_cv_analysis_user_job_created", "user_id", "job_id", "created_at"),)
+
+
+class CvRecommendation(Base):
+    __tablename__ = "cv_recommendations"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    analysis_run_id: Mapped[str] = mapped_column(
+        ForeignKey("cv_analysis_runs.id", ondelete="CASCADE"), index=True
+    )
+    category: Mapped[str] = mapped_column(String(50), index=True)
+    section: Mapped[str] = mapped_column(String(200))
+    current_text: Mapped[str] = mapped_column(Text, default="")
+    suggested_text: Mapped[str] = mapped_column(Text, default="")
+    reason: Mapped[str] = mapped_column(Text)
+    expected_benefit: Mapped[str] = mapped_column(Text)
+    related_job_requirement: Mapped[str] = mapped_column(Text, default="")
+    confidence: Mapped[float] = mapped_column()
+    priority: Mapped[str] = mapped_column(String(20), index=True)
+    recommendation_type: Mapped[str] = mapped_column(String(30))
+    approval_required: Mapped[bool] = mapped_column(Boolean, default=True)
+    decision: Mapped[CvRecommendationDecisionValue] = mapped_column(
+        Enum(CvRecommendationDecisionValue), default=CvRecommendationDecisionValue.PENDING
+    )
+    user_text: Mapped[str | None] = mapped_column(Text)
+    validation: Mapped[dict] = mapped_column(JSON, default=dict)
+    display_order: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    __table_args__ = (Index("ix_cv_recommendations_run_order", "analysis_run_id", "display_order"),)
+
+
+class CvRecommendationEvidence(Base):
+    __tablename__ = "cv_recommendation_evidence"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    recommendation_id: Mapped[str] = mapped_column(
+        ForeignKey("cv_recommendations.id", ondelete="CASCADE"), index=True
+    )
+    fact_id: Mapped[str] = mapped_column(String(240))
+    source_section: Mapped[str] = mapped_column(String(120))
+    quote: Mapped[str] = mapped_column(Text)
+    __table_args__ = (
+        UniqueConstraint("recommendation_id", "fact_id", name="uq_cv_recommendation_fact"),
+    )
+
+
+class CvRecommendationDecision(Base):
+    __tablename__ = "cv_recommendation_decisions"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    recommendation_id: Mapped[str] = mapped_column(
+        ForeignKey("cv_recommendations.id", ondelete="CASCADE"), index=True
+    )
+    actor_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    decision: Mapped[CvRecommendationDecisionValue] = mapped_column(
+        Enum(CvRecommendationDecisionValue)
+    )
+    edited_text: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class CvVariant(Base):
+    __tablename__ = "cv_variants"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    job_id: Mapped[str] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), index=True)
+    base_profile_version_id: Mapped[str] = mapped_column(
+        ForeignKey("profile_versions.id", ondelete="RESTRICT"), index=True
+    )
+    analysis_run_id: Mapped[str] = mapped_column(
+        ForeignKey("cv_analysis_runs.id", ondelete="CASCADE"), index=True
+    )
+    status: Mapped[CvVariantStatus] = mapped_column(Enum(CvVariantStatus), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+    __table_args__ = (
+        UniqueConstraint("user_id", "analysis_run_id", name="uq_cv_variant_analysis"),
+    )
+
+
+class CvVariantVersion(Base):
+    __tablename__ = "cv_variant_versions"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    variant_id: Mapped[str] = mapped_column(
+        ForeignKey("cv_variants.id", ondelete="CASCADE"), index=True
+    )
+    version: Mapped[int] = mapped_column(Integer)
+    status: Mapped[CvVariantStatus] = mapped_column(Enum(CvVariantStatus))
+    content: Mapped[dict] = mapped_column(JSON)
+    applied_recommendation_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    rejected_recommendation_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    user_edits: Mapped[dict] = mapped_column(JSON, default=dict)
+    original_score: Mapped[int] = mapped_column(Integer)
+    estimated_score: Mapped[int] = mapped_column(Integer)
+    score_explanation: Mapped[str] = mapped_column(Text)
+    keywords_added: Mapped[list[str]] = mapped_column(JSON, default=list)
+    sections_improved: Mapped[list[str]] = mapped_column(JSON, default=list)
+    remaining_gaps: Mapped[list[str]] = mapped_column(JSON, default=list)
+    remaining_blockers: Mapped[list[str]] = mapped_column(JSON, default=list)
+    validation: Mapped[dict] = mapped_column(JSON, default=dict)
+    prompt_version: Mapped[str] = mapped_column(String(60))
+    model: Mapped[str] = mapped_column(String(100))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    __table_args__ = (UniqueConstraint("variant_id", "version", name="uq_cv_variant_version"),)
+
+
+class CvVariantValidation(Base):
+    __tablename__ = "cv_variant_validations"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    variant_version_id: Mapped[str] = mapped_column(
+        ForeignKey("cv_variant_versions.id", ondelete="CASCADE"), unique=True
+    )
+    valid: Mapped[bool] = mapped_column(Boolean)
+    issues: Mapped[list[str]] = mapped_column(JSON, default=list)
+    checked_claims: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class CvExport(Base):
+    __tablename__ = "cv_exports"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    variant_version_id: Mapped[str] = mapped_column(
+        ForeignKey("cv_variant_versions.id", ondelete="CASCADE"), index=True
+    )
+    format: Mapped[str] = mapped_column(String(10))
+    storage_key: Mapped[str] = mapped_column(String(100), unique=True)
+    sha256: Mapped[str] = mapped_column(String(64))
+    size_bytes: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    __table_args__ = (UniqueConstraint("variant_version_id", "format", name="uq_cv_export_format"),)

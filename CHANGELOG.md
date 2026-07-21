@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.0 grounded cover-letter completion
+
+- Added multilingual cover letters with structured evidence planning, deterministic rendering,
+  claim validation, immutable edits, explicit approval, and private TXT/DOCX/PDF exports.
+- Added the review interface, integration/E2E coverage, documentation, and migration
+  `20260721_0011`.
+
 ## 1.0.0 job discovery completion
 
 - Added the documented provider compliance registry, official ITJobs.pt and InfoJobs adapters,

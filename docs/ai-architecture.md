@@ -232,3 +232,53 @@ requests. Output uses the existing configured model, retry, timeout, reasoning, 
 settings, with a minimum practical structured-output allowance and a hard 4,000-token ceiling.
 Provider ID, model, prompt version, input/output tokens, and latency are saved; PDF text and prompts
 are not logged. The mock parser is deterministic and all automated tests avoid live providers.
+
+## Prompt: evidence-only CV optimization v1
+
+`cv-optimization-evidence-plan-v2` recommends presentation changes for one already-recommended
+job. Its candidate input is a contact-redacted catalog built from the immutable approved
+`ProfileVersion`; every fact has a stable ID, source section, and exact stored text. The vacancy,
+requirements, and fact catalog are escaped JSON inside explicit untrusted-data boundaries.
+
+The developer instruction forbids invented skills, employers, titles, dates, metrics, language
+levels, education, links, authorization, salary, and experience. It also restricts target section
+paths to fields the deterministic variant applier understands. Missing job requirements must be
+kept in the deterministic match analysis and omitted from the CV-edit plan. The model returns only
+`RecommendationPlan`, a
+strict Pydantic structured output; it cannot edit or persist a CV.
+
+Application validation is authoritative. It verifies exact evidence IDs and quotes, supported
+section paths, numbers and metrics, known skills, links, salary content, language levels,
+sponsorship meaning, and wording provenance. Invalid provider items are omitted and counted on the
+analysis record. User-edited suggestions pass the same validator. Preview and variant generation
+then apply only accepted, mapped recommendations to a deep copy of the approved snapshot.
+
+The default provider is deterministic. OpenAI mode reuses the configured snapshot model, bounded
+description length, output cap, timeout, SDK retry policy, structured parsing, and deterministic
+fallback. One request produces the complete plan. Analysis records store prompt/model IDs, token
+counts, response ID, and latency, but never prompts, job descriptions, CV bodies, or contact data.
+
+## Prompt: cover-letter evidence plan v1
+
+`cover-letter-evidence-plan-v1` selects the smallest relevant set of approved evidence IDs for
+balanced, technical, and/or business-focused cover-letter variants. It does not write prose. The
+candidate catalog comes from the immutable approved `ProfileVersion`; contact fields are not sent.
+Vacancy text and candidate facts are escaped into explicitly delimited untrusted JSON blocks. A
+separate company catalog contains only source-attributed facts marked verified in provider metadata.
+Trusted configuration contains the requested variants and presentation switches plus the
+deterministic match's matching and missing skills.
+
+The developer instruction forbids following embedded instructions, inventing facts, selecting
+missing qualifications, or returning prose. OpenAI mode parses directly into strict
+`CoverLetterPlanSet` structured output. Application validation checks exact variant order, every
+candidate/company ID, exclusion lists, and duplicate evidence. Localized templates render the full
+document and a second validator checks evidence, numbers, skills, company claims, salary,
+relocation, sponsorship, proper nouns, confidence, and requested word range. Edited prose passes
+the same validation; invalid letters cannot be approved or exported.
+
+One request creates all requested plans to reduce latency and repeated input tokens. SDK timeout and
+bounded retry settings are shared with the other AI flows; deterministic fallback remains optional.
+`store=false` is set. Only model/response identity, usage, cost, latency, prompt version, selected
+fact IDs, and final reviewed content are persisted. The implementation follows the official
+[Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs) and
+[text generation](https://developers.openai.com/api/docs/guides/text?api-mode=responses) guidance.
