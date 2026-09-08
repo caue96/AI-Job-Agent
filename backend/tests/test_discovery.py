@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
+from sqlalchemy import select
 
 from app.discovery import (
     calculate_next_run,
@@ -19,7 +20,8 @@ from app.discovery_providers import (
     safe_url,
     sanitize_text,
 )
-from app.models import DiscoverySearchConfiguration
+from app.models import DiscoverySearchConfiguration, MatchEvidence, MatchRecommendationDecision
+from app.repositories import SqlAlchemyUnitOfWork
 from app.services import current_development_user
 
 PROFILE = {
@@ -187,12 +189,13 @@ def test_discovery_end_to_end_deduplicates_scores_and_notifies(client):
     )
     assert created.status_code == 201
     db = client.app.state.test_session
-    user = current_development_user(db)
+    uow = SqlAlchemyUnitOfWork(db)
+    user = current_development_user(uow)
     config = db.get(DiscoverySearchConfiguration, created.json()["id"])
     from app.config import get_settings
 
     run = run_search(
-        db,
+        uow,
         user,
         config,
         get_settings(),
@@ -224,7 +227,8 @@ def test_partial_provider_failure_does_not_erase_success(client):
         },
     ).json()
     db = client.app.state.test_session
-    user = current_development_user(db)
+    uow = SqlAlchemyUnitOfWork(db)
+    user = current_development_user(uow)
     config = db.get(DiscoverySearchConfiguration, created["id"])
 
     class Failure(FakeProvider):
@@ -236,7 +240,7 @@ def test_partial_provider_failure_does_not_erase_success(client):
     from app.config import get_settings
 
     run = run_search(
-        db,
+        uow,
         user,
         config,
         get_settings(),
@@ -269,6 +273,9 @@ def test_manual_import_actions_and_notification_deduplication(client):
         json={"action": "PREPARE_APPLICATION"},
     )
     assert response.status_code == 200 and response.json()["application_id"]
+    session = client.app.state.test_session
+    assert session.scalar(select(MatchRecommendationDecision))
+    assert session.scalar(select(MatchEvidence))
     notifications = client.get("/v1/discovery/notifications").json()
     assert len({item["title"] + item["body"] for item in notifications}) == len(notifications)
 

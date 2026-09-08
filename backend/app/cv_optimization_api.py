@@ -4,8 +4,6 @@ from functools import lru_cache
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import FileResponse
-from sqlalchemy import select
-from sqlalchemy.orm import Session
 
 from app.ai import AIProviderError
 from app.config import get_settings
@@ -40,9 +38,9 @@ from app.cv_optimization_schemas import (
     RecommendationRead,
 )
 from app.cv_schemas import CvProfileDraft
-from app.db import get_db
-from app.models import CvAnalysisRun, CvExport, CvVariant, CvVariantStatus, CvVariantVersion
+from app.models import CvExport, CvVariantStatus, StoredFile
 from app.services import current_development_user, write_audit
+from app.unit_of_work import UnitOfWorkDependency
 
 router = APIRouter(prefix="/v1/cv-optimizations", tags=["cv-optimizations"])
 
@@ -60,124 +58,112 @@ def get_cv_export_storage() -> LocalCvExportStorage:
 @router.post("/analyses", response_model=CvAnalysisRead, status_code=status.HTTP_201_CREATED)
 def analyze_cv(
     payload: CvAnalysisRequest,
-    db: Session = Depends(get_db),
+    uow: UnitOfWorkDependency,
     provider: CvOptimizationProvider = Depends(get_cv_optimization_provider),
 ) -> CvAnalysisRead:
-    user = current_development_user(db)
+    user = current_development_user(uow)
     try:
-        run = create_analysis(db, user, payload.job_id, provider)
-        db.commit()
-        db.refresh(run)
+        run = create_analysis(uow, user, payload.job_id, provider)
+        uow.commit()
+        uow.refresh(run)
     except AIProviderError as exc:
-        db.rollback()
+        uow.rollback()
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    return serialize_analysis(db, run)
+    return serialize_analysis(uow, run)
 
 
 @router.get("/analyses", response_model=list[CvAnalysisRead])
 def analyses(
-    job_id: str | None = Query(default=None, max_length=36), db: Session = Depends(get_db)
+    uow: UnitOfWorkDependency, job_id: str | None = Query(default=None, max_length=36)
 ) -> list[CvAnalysisRead]:
-    user = current_development_user(db)
-    statement = select(CvAnalysisRun).where(CvAnalysisRun.user_id == user.id)
-    if job_id:
-        statement = statement.where(CvAnalysisRun.job_id == job_id)
-    records = list(db.scalars(statement.order_by(CvAnalysisRun.created_at.desc()).limit(100)))
-    return [serialize_analysis(db, record) for record in records]
+    user = current_development_user(uow)
+    records = uow.recommendations.list_analyses(user.id, job_id)
+    return [serialize_analysis(uow, record) for record in records]
 
 
 @router.get("/analyses/{analysis_id}", response_model=CvAnalysisRead)
-def analysis(analysis_id: str, db: Session = Depends(get_db)) -> CvAnalysisRead:
-    user = current_development_user(db)
-    return serialize_analysis(db, owned_analysis(db, user.id, analysis_id))
+def analysis(analysis_id: str, uow: UnitOfWorkDependency) -> CvAnalysisRead:
+    user = current_development_user(uow)
+    return serialize_analysis(uow, owned_analysis(uow, user.id, analysis_id))
 
 
 @router.patch("/recommendations/{recommendation_id}", response_model=RecommendationRead)
 def decide(
     recommendation_id: str,
     payload: RecommendationDecisionRequest,
-    db: Session = Depends(get_db),
+    uow: UnitOfWorkDependency,
 ) -> RecommendationRead:
-    user = current_development_user(db)
-    item = decide_recommendation(db, user, recommendation_id, payload)
-    db.commit()
-    db.refresh(item)
-    return serialize_recommendation(db, item)
+    user = current_development_user(uow)
+    item = decide_recommendation(uow, user, recommendation_id, payload)
+    uow.commit()
+    uow.refresh(item)
+    return serialize_recommendation(uow, item)
 
 
 @router.post("/analyses/{analysis_id}/recommendations/batch", response_model=CvAnalysisRead)
 def decide_batch(
     analysis_id: str,
     payload: RecommendationBatchRequest,
-    db: Session = Depends(get_db),
+    uow: UnitOfWorkDependency,
 ) -> CvAnalysisRead:
-    user = current_development_user(db)
-    run = batch_decide(db, user, analysis_id, payload.action)
-    db.commit()
-    db.refresh(run)
-    return serialize_analysis(db, run)
+    user = current_development_user(uow)
+    run = batch_decide(uow, user, analysis_id, payload.action)
+    uow.commit()
+    uow.refresh(run)
+    return serialize_analysis(uow, run)
 
 
 @router.post("/analyses/{analysis_id}/variants", response_model=CvVariantRead, status_code=201)
 def create_variant(
     analysis_id: str,
     payload: GenerateVariantRequest,
-    db: Session = Depends(get_db),
+    uow: UnitOfWorkDependency,
 ) -> CvVariantRead:
-    user = current_development_user(db)
-    variant = generate_variant(db, user, analysis_id, payload.status)
-    db.commit()
-    db.refresh(variant)
-    return serialize_variant(db, variant)
+    user = current_development_user(uow)
+    variant = generate_variant(uow, user, analysis_id, payload.status)
+    uow.commit()
+    uow.refresh(variant)
+    return serialize_variant(uow, variant)
 
 
 @router.post("/analyses/{analysis_id}/preview", response_model=CvVariantPreview)
-def preview(analysis_id: str, db: Session = Depends(get_db)) -> CvVariantPreview:
-    user = current_development_user(db)
-    return preview_variant(db, user, analysis_id)
+def preview(analysis_id: str, uow: UnitOfWorkDependency) -> CvVariantPreview:
+    user = current_development_user(uow)
+    return preview_variant(uow, user, analysis_id)
 
 
 @router.get("/variants", response_model=list[CvVariantRead])
 def variants(
-    job_id: str | None = Query(default=None, max_length=36), db: Session = Depends(get_db)
+    uow: UnitOfWorkDependency, job_id: str | None = Query(default=None, max_length=36)
 ) -> list[CvVariantRead]:
-    user = current_development_user(db)
-    statement = select(CvVariant).where(CvVariant.user_id == user.id)
-    if job_id:
-        statement = statement.where(CvVariant.job_id == job_id)
-    records = list(db.scalars(statement.order_by(CvVariant.created_at.desc()).limit(100)))
-    return [serialize_variant(db, record) for record in records]
+    user = current_development_user(uow)
+    records = uow.recommendations.list_variants(user.id, job_id)
+    return [serialize_variant(uow, record) for record in records]
 
 
 @router.get("/variants/{variant_id}", response_model=CvVariantRead)
-def variant(variant_id: str, db: Session = Depends(get_db)) -> CvVariantRead:
-    user = current_development_user(db)
-    return serialize_variant(db, owned_variant(db, user.id, variant_id))
+def variant(variant_id: str, uow: UnitOfWorkDependency) -> CvVariantRead:
+    user = current_development_user(uow)
+    return serialize_variant(uow, owned_variant(uow, user.id, variant_id))
 
 
 @router.get("/variants/{variant_id}/compare", response_model=CvVariantComparison)
-def compare(variant_id: str, db: Session = Depends(get_db)) -> CvVariantComparison:
-    user = current_development_user(db)
-    return compare_variant(db, user.id, variant_id)
+def compare(variant_id: str, uow: UnitOfWorkDependency) -> CvVariantComparison:
+    user = current_development_user(uow)
+    return compare_variant(uow, user.id, variant_id)
 
 
 @router.delete("/variants/{variant_id}", status_code=204)
 def delete_variant(
     variant_id: str,
-    db: Session = Depends(get_db),
+    uow: UnitOfWorkDependency,
     storage: LocalCvExportStorage = Depends(get_cv_export_storage),
 ) -> None:
-    user = current_development_user(db)
-    variant_record = owned_variant(db, user.id, variant_id)
-    export_keys = list(
-        db.scalars(
-            select(CvExport.storage_key)
-            .join(CvVariantVersion, CvVariantVersion.id == CvExport.variant_version_id)
-            .where(CvVariantVersion.variant_id == variant_record.id)
-        )
-    )
-    remove_variant(db, user, variant_id)
-    db.commit()
+    user = current_development_user(uow)
+    variant_record = owned_variant(uow, user.id, variant_id)
+    export_keys = uow.recommendations.export_keys(variant_record.id)
+    remove_variant(uow, user, variant_id)
+    uow.commit()
     for key in export_keys:
         storage.delete(key)
 
@@ -186,17 +172,13 @@ def delete_variant(
 def export_variant(
     variant_id: str,
     payload: ExportRequest,
-    db: Session = Depends(get_db),
+    uow: UnitOfWorkDependency,
     storage: LocalCvExportStorage = Depends(get_cv_export_storage),
 ) -> CvExport:
-    user = current_development_user(db)
-    variant_record = owned_variant(db, user.id, variant_id)
-    version = latest_variant_version(db, variant_record.id)
-    existing = db.scalar(
-        select(CvExport).where(
-            CvExport.variant_version_id == version.id, CvExport.format == payload.format
-        )
-    )
+    user = current_development_user(uow)
+    variant_record = owned_variant(uow, user.id, variant_id)
+    version = latest_variant_version(uow, variant_record.id)
+    existing = uow.recommendations.export(version.id, payload.format)
     if existing:
         return existing
     if variant_record.status not in {CvVariantStatus.APPROVED, CvVariantStatus.EXPORTED}:
@@ -213,11 +195,27 @@ def export_variant(
         sha256=digest,
         size_bytes=size,
     )
-    db.add(record)
+    uow.add(record)
+    uow.flush()
+    uow.add(
+        StoredFile(
+            owner_id=user.id,
+            cv_export_id=record.id,
+            storage_key=key,
+            original_filename=f"job-specific-cv.{payload.format}",
+            media_type=(
+                "application/pdf"
+                if payload.format == "pdf"
+                else "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            ),
+            size_bytes=size,
+            sha256=digest,
+        )
+    )
     variant_record.status = CvVariantStatus.EXPORTED
     version.status = CvVariantStatus.EXPORTED
     write_audit(
-        db,
+        uow,
         user.id,
         "cv_optimization.variant.exported",
         "cv_variant",
@@ -225,27 +223,22 @@ def export_variant(
         {"format": payload.format, "size_bytes": size},
     )
     try:
-        db.commit()
+        uow.commit()
     except Exception:
         storage.delete(key)
         raise
-    db.refresh(record)
+    uow.refresh(record)
     return record
 
 
 @router.get("/exports/{export_id}/download", response_class=FileResponse)
 def download_export(
     export_id: str,
-    db: Session = Depends(get_db),
+    uow: UnitOfWorkDependency,
     storage: LocalCvExportStorage = Depends(get_cv_export_storage),
 ) -> FileResponse:
-    user = current_development_user(db)
-    record = db.scalar(
-        select(CvExport)
-        .join(CvVariantVersion, CvVariantVersion.id == CvExport.variant_version_id)
-        .join(CvVariant, CvVariant.id == CvVariantVersion.variant_id)
-        .where(CvExport.id == export_id, CvVariant.user_id == user.id)
-    )
+    user = current_development_user(uow)
+    record = uow.recommendations.export_for_download(export_id, user.id)
     if not record:
         raise HTTPException(status_code=404, detail="CV export not found")
     media_type = (

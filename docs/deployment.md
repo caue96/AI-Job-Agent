@@ -6,7 +6,8 @@ tenant ownership are implemented and reviewed.
 
 ## Deployment status
 
-The repository supports reproducible local development with Docker Compose or native tools.
+The repository supports reproducible local development with Docker Compose or native tools backed
+by PostgreSQL.
 It does **not** support production deployment yet: `APP_ENV=production` deliberately fails
 startup because authentication and tenant isolation are absent. Keep the API bound to trusted
 local development networks.
@@ -72,7 +73,8 @@ docker compose down --volumes
 
 ## Native setup from scratch
 
-Prerequisites: Python 3.12, Node.js 22, Corepack, and ports 5173 and 8000 available.
+Prerequisites: Python 3.12, Node.js 22, Corepack, PostgreSQL 16 (native or the Compose `db`
+service), and ports 5173 and 8000 available.
 
 ### Backend on Windows PowerShell
 
@@ -82,8 +84,10 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
+Copy-Item ..\.env.example ..\.env
 Copy-Item ..\.env.example .env
-$env:DATABASE_URL = "sqlite:///./job_agent.db"
+docker compose -f ..\docker-compose.yml up -d db
+$env:DATABASE_URL = "postgresql+psycopg://jobagent:change-me@localhost:5432/jobagent"
 alembic upgrade head
 uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
@@ -96,14 +100,18 @@ python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -e '.[dev]'
+cp ../.env.example ../.env
 cp ../.env.example .env
-export DATABASE_URL='sqlite:///./job_agent.db'
+docker compose -f ../docker-compose.yml up -d db
+export DATABASE_URL='postgresql+psycopg://jobagent:change-me@localhost:5432/jobagent'
 alembic upgrade head
 uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-The local SQLite path is relative to `backend/`. Alembic creates the schema; application code
-does not call `create_all` at startup.
+The repository-root and backend `.env` files must define the same PostgreSQL password used in
+`DATABASE_URL`.
+Alembic creates the schema; application code does not call `create_all` at startup. SQLite is
+limited to deterministic unit tests and the legacy import source.
 
 ### Frontend
 
@@ -122,26 +130,32 @@ the API uses another origin. Any custom frontend origin must also be present in
 
 ## Verification and migrations
 
-Run migrations against an explicit disposable URL when checking the migration chain:
+Start the disposable PostgreSQL test service and run migrations against its explicit URL:
 
 ```bash
 cd backend
-DATABASE_URL=sqlite:///./migration_check.db alembic upgrade head
-DATABASE_URL=sqlite:///./migration_check.db alembic check
+docker compose -f ../docker-compose.yml --profile test up -d test-db
+DATABASE_URL=postgresql+psycopg://jobagent_test:jobagent_test@localhost:55432/jobagent_test alembic upgrade head
+DATABASE_URL=postgresql+psycopg://jobagent_test:jobagent_test@localhost:55432/jobagent_test alembic check
+TEST_POSTGRES_URL=postgresql+psycopg://jobagent_test:jobagent_test@localhost:55432/jobagent_test pytest -q tests/test_postgres_integration.py
 ```
 
 On PowerShell:
 
 ```powershell
 cd backend
-$env:DATABASE_URL = "sqlite:///./migration_check.db"
+docker compose -f ..\docker-compose.yml --profile test up -d test-db
+$env:DATABASE_URL = "postgresql+psycopg://jobagent_test:jobagent_test@localhost:55432/jobagent_test"
 alembic upgrade head
 alembic check
+$env:TEST_POSTGRES_URL = $env:DATABASE_URL
+pytest -q tests/test_postgres_integration.py
 ```
 
-Run the complete quality commands from the README before hand-off. Back up any persistent
-database before upgrading it. Alembic downgrade paths exist for development but are not a
-substitute for a backup and restore plan.
+The PostgreSQL integration fixture drops and recreates the `public` schema and therefore refuses
+database names that do not end in `test`. Never point it at a developer or production database.
+Run the complete quality commands from the README before hand-off. See
+[persistence.md](persistence.md) for upgrades, legacy import, backups, validation, and rollback.
 
 ## OpenAI development mode
 
@@ -160,7 +174,7 @@ and tests:
 - managed PostgreSQL, TLS termination, secret management, backups, and recovery drills;
 - structured redacted logging, metrics, tracing, and alerting;
 - deployment-specific CSP, HSTS, request-size, connection, and timeout controls;
-- PostgreSQL migration/integration tests and a release migration strategy;
+- a reviewed managed-PostgreSQL release migration and disaster-recovery strategy;
 - a reviewed release topology and image-signing/provenance process.
 
 The current Compose file is a local development topology, not a production manifest.
@@ -178,7 +192,9 @@ private volume and the same user-scoped download boundary.
 `docker compose down` preserves the database and both CV volumes. `docker compose down -v`
 permanently removes all three and is therefore a destructive reset. Back up and restore
 `postgres_data`, `cv_uploads`, and `cv_exports` as one consistency unit. The default 30-day
-upload-file retention is enforced when a new upload starts, while database imports and approved
-profile snapshots remain until deleted. Export files are deleted with their owning CV variant.
+upload-file retention is enforced when a new upload starts. PostgreSQL stores each file's safe key,
+owner, MIME type, byte size, checksum, retention state, and deletion timestamp; raw local paths are
+never returned. Database imports and approved profile snapshots remain until deleted. Export files
+are deleted with their owning CV variant.
 Unapproved cover-letter exports are deleted with their draft; approved/exported cover letters are
 retained as audit records.

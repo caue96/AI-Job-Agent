@@ -2,22 +2,21 @@ from unittest.mock import MagicMock
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
 
 from app.models import Job, User
+from app.repositories import PersistenceConflict
 from app.schemas import ApplicationCreate, JobCreate, ProfileCreate
 from app.services import create_application, create_job, create_profile, current_development_user
 
 
-def integrity_error() -> IntegrityError:
-    return IntegrityError("INSERT", {}, RuntimeError("unique constraint"))
+def persistence_conflict() -> PersistenceConflict:
+    return PersistenceConflict("unique constraint")
 
 
 def test_create_job_translates_a_concurrent_duplicate_to_conflict():
-    db = MagicMock(spec=Session)
-    db.execute.return_value.all.return_value = []
-    db.flush.side_effect = integrity_error()
+    db = MagicMock()
+    db.jobs.duplicate_candidates.return_value = []
+    db.flush.side_effect = persistence_conflict()
     payload = JobCreate(
         source="manual", company="Example", title="Engineer", description="Build systems."
     )
@@ -31,10 +30,10 @@ def test_create_job_translates_a_concurrent_duplicate_to_conflict():
 
 
 def test_create_application_translates_a_concurrent_duplicate_to_conflict():
-    db = MagicMock(spec=Session)
-    db.get.return_value = Job()
-    db.scalar.return_value = None
-    db.flush.side_effect = integrity_error()
+    db = MagicMock()
+    db.jobs.get.return_value = Job()
+    db.applications.get_for_job.return_value = None
+    db.flush.side_effect = persistence_conflict()
     user = User(id="user-1", email="local@example.invalid")
 
     with pytest.raises(HTTPException) as raised:
@@ -46,10 +45,10 @@ def test_create_application_translates_a_concurrent_duplicate_to_conflict():
 
 
 def test_local_user_bootstrap_recovers_from_a_concurrent_insert():
-    db = MagicMock(spec=Session)
+    db = MagicMock()
     winner = User(id="user-1", email="local@example.invalid")
-    db.scalar.side_effect = [None, winner]
-    db.flush.side_effect = integrity_error()
+    db.get_user_by_email.side_effect = [None, winner]
+    db.flush.side_effect = persistence_conflict()
 
     result = current_development_user(db)
 
@@ -58,9 +57,9 @@ def test_local_user_bootstrap_recovers_from_a_concurrent_insert():
 
 
 def test_create_profile_translates_a_concurrent_duplicate_to_conflict():
-    db = MagicMock(spec=Session)
-    db.scalar.return_value = None
-    db.flush.side_effect = integrity_error()
+    db = MagicMock()
+    db.candidates.get_profile.return_value = None
+    db.flush.side_effect = persistence_conflict()
     user = User(id="user-1", email="local@example.invalid")
 
     with pytest.raises(HTTPException) as raised:

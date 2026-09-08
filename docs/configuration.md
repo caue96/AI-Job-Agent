@@ -14,7 +14,7 @@ loads the repository-root `.env` explicitly.
 | Variable | Default | Validation and purpose |
 | --- | --- | --- |
 | `APP_ENV` | `development` | `development`, `test`, or `production`. Production intentionally fails startup until authentication and tenant isolation exist. |
-| `DATABASE_URL` | `sqlite:///./job_agent.db` | SQLAlchemy URL. Compose overrides this with its PostgreSQL service URL. |
+| `DATABASE_URL` | `postgresql+psycopg://jobagent@localhost:5432/jobagent` | Authoritative PostgreSQL SQLAlchemy URL without a built-in password. SQLite is rejected unless `APP_ENV=test`. Compose injects its internal service URL. |
 | `CORS_ORIGINS` | `http://localhost:5173` | Comma-separated explicit HTTP(S) origins. Wildcards, credentials, paths, queries, and fragments are rejected. |
 | `OPENAI_API_KEY` | unset | Secret required only when `AI_GENERATION_MODE=openai`; represented as a redacted secret value. |
 | `OPENAI_MODEL` | `gpt-5.4-mini-2026-03-17` | Snapshot used for structured relevance selection. Override only after evaluation. |
@@ -34,7 +34,7 @@ loads the repository-root `.env` explicitly.
 | `CV_MAX_PAGES` | `40` | Maximum PDF page count, from 1 through 200. |
 | `CV_MIN_EXTRACTED_CHARACTERS` | `80` | Non-whitespace text below this threshold marks the PDF as likely scanned instead of invoking AI. |
 | `CV_RETENTION_DAYS` | `30` | Uploaded-file retention, from 1 through 3,650 days. Expired files are purged when an upload begins; records remain. |
-| `CV_UPLOADS_PER_MINUTE` | `10` | Per-user, process-local upload attempt limit, from 1 through 120. Suitable only for the local single-process release. |
+| `CV_UPLOADS_PER_MINUTE` | `10` | Per-user upload attempt limit, from 1 through 120. Attempts are stored in PostgreSQL and serialized with a transaction advisory lock. |
 | `MATCHING_PERMITTED_COUNTRIES` | `ES,PT,IE` | Comma-separated two-letter alphabetic country codes, normalized and deduplicated at startup. |
 | `MATCHING_ALLOW_REMOTE` | `true` | Enables remote-work matching. |
 | `MATCHING_HARD_REJECT_MISSING_REQUIRED_SKILLS` | `false` | Converts missing recognized required skills into hard blockers. |
@@ -52,9 +52,11 @@ loads the repository-root `.env` explicitly.
 | `POSTGRES_DB` | `jobagent` | Database created by the PostgreSQL container. |
 | `POSTGRES_USER` | `jobagent` | PostgreSQL role used by the API. |
 | `POSTGRES_PASSWORD` | none; required | Required by Compose interpolation. Use a non-empty URL-safe local password because it is interpolated into `DATABASE_URL`. |
+| `POSTGRES_PORT` | `5432` | Loopback-only host port for native backend tools to reach the Compose database. Change it when port 5432 is occupied. |
 
-Compose supplies its own PostgreSQL `DATABASE_URL` to the API, so the SQLite value in
-`.env.example` is used only by native development.
+Compose supplies its own PostgreSQL `DATABASE_URL` to the API. `DATABASE_URL` in `.env.example`
+is for native backend commands launched on the host. The values of `POSTGRES_USER`,
+`POSTGRES_PASSWORD`, `POSTGRES_DB`, and `POSTGRES_PORT` must agree with it.
 
 ## Frontend build-time variable
 
@@ -71,7 +73,11 @@ Local deterministic development:
 
 ```dotenv
 APP_ENV=development
-DATABASE_URL=sqlite:///./job_agent.db
+POSTGRES_DB=jobagent
+POSTGRES_USER=jobagent
+POSTGRES_PASSWORD=change-me
+POSTGRES_PORT=5432
+DATABASE_URL=postgresql+psycopg://jobagent:change-me@localhost:5432/jobagent
 CORS_ORIGINS=http://localhost:5173
 AI_GENERATION_MODE=mock
 CV_STORAGE_PATH=./data/cv_uploads

@@ -97,10 +97,10 @@ unprivileged user.
 
 ### M1. No distributed rate limiting or AI budgets (open, production blocked)
 
-CV uploads have a bounded process-local, per-development-user limit. Other API operations have no
-per-user quotas or AI-generation budgets. A production implementation depends on authenticated
-identity and deployment topology. Add distributed, identity-aware limits before enabling
-production; the CV limiter is intentionally not represented as a multi-worker security boundary.
+CV uploads have a bounded PostgreSQL-backed limit shared by API workers for the local development
+identity. Other API operations have no per-user quotas or AI-generation budgets. A production
+implementation depends on authenticated identity and deployment topology; add distributed,
+identity-aware limits before enabling production.
 
 ### M2. Browser security headers are incomplete at the repository proxy (open)
 

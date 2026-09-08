@@ -3,6 +3,7 @@
 .audit-venv/
 .deps/
 .testdeps/
+.sandboxdeps/
 .cvdeps/
 backend/.runtimecv/
 data/cv_uploads/
@@ -10,6 +11,7 @@ backend/data/cv_uploads/
 backend/data/cv_exports/
 __pycache__/
 .pytest_cache/
+.pytest-tmp*/
 .ruff_cache/
 .coverage
 htmlcov/

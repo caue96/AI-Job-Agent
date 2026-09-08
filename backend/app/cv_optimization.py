@@ -7,8 +7,6 @@ import re
 from hashlib import sha256
 
 from fastapi import HTTPException, status
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session
 
 from app.cv_optimization_ai import (
     PROMPT_VERSION,
@@ -43,6 +41,7 @@ from app.models import (
     ProfileVersion,
     User,
 )
+from app.repositories import UnitOfWork
 from app.services import write_audit
 
 
@@ -50,13 +49,8 @@ def _not_found(name: str) -> HTTPException:
     return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"{name} not found")
 
 
-def _latest_profile_version(db: Session, user_id: str) -> ProfileVersion:
-    version = db.scalar(
-        select(ProfileVersion)
-        .where(ProfileVersion.user_id == user_id)
-        .order_by(ProfileVersion.version.desc(), ProfileVersion.created_at.desc())
-        .limit(1)
-    )
+def _latest_profile_version(uow: UnitOfWork, user_id: str) -> ProfileVersion:
+    version = uow.candidates.latest_profile_version(user_id)
     if not version:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -65,13 +59,8 @@ def _latest_profile_version(db: Session, user_id: str) -> ProfileVersion:
     return version
 
 
-def _latest_match(db: Session, user_id: str, job_id: str) -> DiscoveryMatchResult:
-    match = db.scalar(
-        select(DiscoveryMatchResult)
-        .where(DiscoveryMatchResult.user_id == user_id, DiscoveryMatchResult.job_id == job_id)
-        .order_by(DiscoveryMatchResult.created_at.desc())
-        .limit(1)
-    )
+def _latest_match(uow: UnitOfWork, user_id: str, job_id: str) -> DiscoveryMatchResult:
+    match = uow.discovery.latest_match(user_id, job_id)
     if not match:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -88,13 +77,13 @@ def _job_hash(job: Job) -> str:
 
 
 def create_analysis(
-    db: Session, user: User, job_id: str, provider: CvOptimizationProvider
+    uow: UnitOfWork, user: User, job_id: str, provider: CvOptimizationProvider
 ) -> CvAnalysisRun:
-    job = db.get(Job, job_id)
+    job = uow.jobs.get(job_id)
     if not job:
         raise _not_found("Job")
-    profile_version = _latest_profile_version(db, user.id)
-    match = _latest_match(db, user.id, job.id)
+    profile_version = _latest_profile_version(uow, user.id)
+    match = _latest_match(uow, user.id, job.id)
     profile = CvProfileDraft.model_validate(profile_version.snapshot)
     facts = approved_profile_facts(profile)
     user_id = user.id
@@ -110,12 +99,12 @@ def create_analysis(
     }
     # End the read transaction before a potentially slow external provider request. The detached
     # Job contains only already-loaded scalar data and is revalidated before anything is stored.
-    db.expunge(job)
-    db.commit()
+    uow.detach(job)
+    uow.commit()
     plan, metadata = provider.propose(profile=profile, job=job, facts=facts)
-    current_job = db.get(Job, job_id)
-    current_profile_version = db.get(ProfileVersion, profile_version_id)
-    current_match = db.get(DiscoveryMatchResult, match_result_id)
+    current_job = uow.jobs.get(job_id)
+    current_profile_version = uow.candidates.get_profile_version(profile_version_id, user_id)
+    current_match = uow.discovery.get_match(match_result_id, user_id)
     if (
         not current_job
         or _job_hash(current_job) != input_summary["job_content_hash"]
@@ -138,9 +127,9 @@ def create_analysis(
         prompt_version=PROMPT_VERSION,
         model="pending",
     )
-    db.add(run)
-    db.flush()
-    write_audit(db, user_id, "cv_optimization.analysis.requested", "cv_analysis_run", run.id)
+    uow.add(run)
+    uow.flush()
+    write_audit(uow, user_id, "cv_optimization.analysis.requested", "cv_analysis_run", run.id)
     invalid: dict[str, list[str]] = {}
     accepted_count = 0
     for index, proposal in enumerate(plan.recommendations):
@@ -164,10 +153,10 @@ def create_analysis(
             validation={"valid": True, "issues": []},
             display_order=index,
         )
-        db.add(record)
-        db.flush()
+        uow.add(record)
+        uow.flush()
         for evidence in proposal.evidence:
-            db.add(
+            uow.add(
                 CvRecommendationEvidence(
                     recommendation_id=record.id,
                     fact_id=evidence.fact_id,
@@ -188,7 +177,7 @@ def create_analysis(
     run.output_tokens = metadata.output_tokens
     run.latency_ms = metadata.latency_ms
     write_audit(
-        db,
+        uow,
         user_id,
         "cv_optimization.analysis.completed",
         "cv_analysis_run",
@@ -199,37 +188,20 @@ def create_analysis(
 
 
 def owned_analysis(
-    db: Session, user_id: str, analysis_id: str, lock: bool = False
+    uow: UnitOfWork, user_id: str, analysis_id: str, lock: bool = False
 ) -> CvAnalysisRun:
-    statement = select(CvAnalysisRun).where(
-        CvAnalysisRun.id == analysis_id, CvAnalysisRun.user_id == user_id
-    )
-    if lock:
-        statement = statement.with_for_update()
-    result = db.scalar(statement)
+    result = uow.recommendations.get_analysis(analysis_id, user_id, lock=lock)
     if not result:
         raise _not_found("CV analysis")
     return result
 
 
-def _recommendations(db: Session, analysis_id: str) -> list[CvRecommendation]:
-    return list(
-        db.scalars(
-            select(CvRecommendation)
-            .where(CvRecommendation.analysis_run_id == analysis_id)
-            .order_by(CvRecommendation.display_order, CvRecommendation.created_at)
-        )
-    )
+def _recommendations(uow: UnitOfWork, analysis_id: str) -> list[CvRecommendation]:
+    return uow.recommendations.recommendations(analysis_id)
 
 
-def serialize_recommendation(db: Session, item: CvRecommendation) -> RecommendationRead:
-    evidence = list(
-        db.scalars(
-            select(CvRecommendationEvidence).where(
-                CvRecommendationEvidence.recommendation_id == item.id
-            )
-        )
-    )
+def serialize_recommendation(uow: UnitOfWork, item: CvRecommendation) -> RecommendationRead:
+    evidence = uow.recommendations.evidence(item.id)
     return RecommendationRead(
         **{
             column: getattr(item, column)
@@ -256,7 +228,7 @@ def serialize_recommendation(db: Session, item: CvRecommendation) -> Recommendat
     )
 
 
-def serialize_analysis(db: Session, run: CvAnalysisRun) -> CvAnalysisRead:
+def serialize_analysis(uow: UnitOfWork, run: CvAnalysisRun) -> CvAnalysisRead:
     return CvAnalysisRead(
         **{
             column: getattr(run, column)
@@ -276,38 +248,27 @@ def serialize_analysis(db: Session, run: CvAnalysisRun) -> CvAnalysisRead:
             )
         },
         recommendations=[
-            serialize_recommendation(db, item) for item in _recommendations(db, run.id)
+            serialize_recommendation(uow, item) for item in _recommendations(uow, run.id)
         ],
     )
 
 
 def decide_recommendation(
-    db: Session,
+    uow: UnitOfWork,
     user: User,
     recommendation_id: str,
     payload: RecommendationDecisionRequest,
 ) -> CvRecommendation:
-    item = db.scalar(
-        select(CvRecommendation)
-        .join(CvAnalysisRun)
-        .where(CvRecommendation.id == recommendation_id, CvAnalysisRun.user_id == user.id)
-        .with_for_update()
-    )
-    if not item:
+    pair = uow.recommendations.recommendation_with_analysis(recommendation_id, user.id, lock=True)
+    if not pair:
         raise _not_found("Recommendation")
-    run = owned_analysis(db, user.id, item.analysis_run_id, lock=True)
-    job = db.get(Job, run.job_id)
-    profile_version = db.get(ProfileVersion, run.profile_version_id)
+    item, run = pair
+    job = uow.jobs.get(run.job_id)
+    profile_version = uow.candidates.get_profile_version(run.profile_version_id, user.id)
     if not job or not profile_version:
         raise HTTPException(status_code=409, detail="The analysis inputs are no longer available")
     if payload.decision == "EDITED":
-        evidence = list(
-            db.scalars(
-                select(CvRecommendationEvidence).where(
-                    CvRecommendationEvidence.recommendation_id == item.id
-                )
-            )
-        )
+        evidence = uow.recommendations.evidence(item.id)
         proposal = _proposal_for_validation(item, evidence, payload.edited_text or "")
         facts = approved_profile_facts(CvProfileDraft.model_validate(profile_version.snapshot))
         issues = validate_recommendation(proposal, facts, job)
@@ -319,7 +280,7 @@ def decide_recommendation(
     decision = CvRecommendationDecisionValue(payload.decision)
     item.decision = decision
     item.user_text = payload.edited_text
-    db.add(
+    uow.add(
         CvRecommendationDecision(
             recommendation_id=item.id,
             actor_id=user.id,
@@ -327,22 +288,14 @@ def decide_recommendation(
             edited_text=payload.edited_text,
         )
     )
-    pending = db.scalar(
-        select(func.count())
-        .select_from(CvRecommendation)
-        .where(
-            CvRecommendation.analysis_run_id == run.id,
-            CvRecommendation.id != item.id,
-            CvRecommendation.decision == CvRecommendationDecisionValue.PENDING,
-        )
-    )
+    pending = uow.recommendations.pending_recommendation_count(run.id)
     run.status = (
         CvOptimizationStatus.RECOMMENDATIONS_APPROVED
         if pending == 0
         else CvOptimizationStatus.AWAITING_REVIEW
     )
     write_audit(
-        db,
+        uow,
         user.id,
         "cv_optimization.recommendation.decided",
         "cv_recommendation",
@@ -382,19 +335,19 @@ def _proposal_for_validation(
     )
 
 
-def batch_decide(db: Session, user: User, analysis_id: str, action: str) -> CvAnalysisRun:
-    run = owned_analysis(db, user.id, analysis_id, lock=True)
+def batch_decide(uow: UnitOfWork, user: User, analysis_id: str, action: str) -> CvAnalysisRun:
+    run = owned_analysis(uow, user.id, analysis_id, lock=True)
     decision = (
         CvRecommendationDecisionValue.PENDING
         if action == "RESET"
         else CvRecommendationDecisionValue.ACCEPTED
     )
-    for item in _recommendations(db, run.id):
+    for item in _recommendations(uow, run.id):
         if action == "ACCEPT_SAFE" and not item.validation.get("valid"):
             continue
         item.decision = decision
         item.user_text = None
-        db.add(
+        uow.add(
             CvRecommendationDecision(
                 recommendation_id=item.id,
                 actor_id=user.id,
@@ -407,7 +360,7 @@ def batch_decide(db: Session, user: User, analysis_id: str, action: str) -> CvAn
         else CvOptimizationStatus.RECOMMENDATIONS_APPROVED
     )
     write_audit(
-        db,
+        uow,
         user.id,
         f"cv_optimization.recommendations.{action.casefold()}",
         "cv_analysis_run",
@@ -475,12 +428,12 @@ def _apply_recommendation(content: dict, item: CvRecommendation, text: str) -> b
     return False
 
 
-def preview_variant(db: Session, user: User, analysis_id: str) -> CvVariantPreview:
-    run = owned_analysis(db, user.id, analysis_id)
-    profile_version = db.get(ProfileVersion, run.profile_version_id)
+def preview_variant(uow: UnitOfWork, user: User, analysis_id: str) -> CvVariantPreview:
+    run = owned_analysis(uow, user.id, analysis_id)
+    profile_version = uow.candidates.get_profile_version(run.profile_version_id, user.id)
     if not profile_version:
         raise HTTPException(status_code=409, detail="The approved base CV version is unavailable")
-    recommendations = _recommendations(db, run.id)
+    recommendations = _recommendations(uow, run.id)
     accepted = [
         item
         for item in recommendations
@@ -534,13 +487,15 @@ def preview_variant(db: Session, user: User, analysis_id: str) -> CvVariantPrevi
     )
 
 
-def generate_variant(db: Session, user: User, analysis_id: str, requested_status: str) -> CvVariant:
-    run = owned_analysis(db, user.id, analysis_id, lock=True)
-    profile_version = db.get(ProfileVersion, run.profile_version_id)
+def generate_variant(
+    uow: UnitOfWork, user: User, analysis_id: str, requested_status: str
+) -> CvVariant:
+    run = owned_analysis(uow, user.id, analysis_id, lock=True)
+    profile_version = uow.candidates.get_profile_version(run.profile_version_id, user.id)
     if not profile_version:
         raise HTTPException(status_code=409, detail="The approved base CV version is unavailable")
-    recommendations = _recommendations(db, run.id)
-    preview = preview_variant(db, user, analysis_id)
+    recommendations = _recommendations(uow, run.id)
+    preview = preview_variant(uow, user, analysis_id)
     user_edits = {
         item.id: item.user_text
         for item in recommendations
@@ -548,9 +503,7 @@ def generate_variant(db: Session, user: User, analysis_id: str, requested_status
         and item.decision == CvRecommendationDecisionValue.EDITED
         and item.id in preview.applied_recommendation_ids
     }
-    existing = db.scalar(
-        select(CvVariant).where(CvVariant.user_id == user.id, CvVariant.analysis_run_id == run.id)
-    )
+    existing = uow.recommendations.variant_for_analysis(user.id, run.id)
     if existing:
         raise HTTPException(status_code=409, detail="A CV variant already exists for this analysis")
     variant_status = CvVariantStatus(requested_status)
@@ -561,8 +514,8 @@ def generate_variant(db: Session, user: User, analysis_id: str, requested_status
         analysis_run_id=run.id,
         status=variant_status,
     )
-    db.add(variant)
-    db.flush()
+    uow.add(variant)
+    uow.flush()
     version = CvVariantVersion(
         variant_id=variant.id,
         version=1,
@@ -582,9 +535,9 @@ def generate_variant(db: Session, user: User, analysis_id: str, requested_status
         prompt_version=run.prompt_version,
         model=run.model,
     )
-    db.add(version)
-    db.flush()
-    db.add(
+    uow.add(version)
+    uow.flush()
+    uow.add(
         CvVariantValidation(
             variant_version_id=version.id,
             valid=True,
@@ -594,7 +547,7 @@ def generate_variant(db: Session, user: User, analysis_id: str, requested_status
     )
     run.status = CvOptimizationStatus.CV_VARIANT_SAVED
     write_audit(
-        db,
+        uow,
         user.id,
         "cv_optimization.variant.created",
         "cv_variant",
@@ -604,28 +557,21 @@ def generate_variant(db: Session, user: User, analysis_id: str, requested_status
     return variant
 
 
-def owned_variant(db: Session, user_id: str, variant_id: str) -> CvVariant:
-    result = db.scalar(
-        select(CvVariant).where(CvVariant.id == variant_id, CvVariant.user_id == user_id)
-    )
+def owned_variant(uow: UnitOfWork, user_id: str, variant_id: str) -> CvVariant:
+    result = uow.recommendations.get_variant(variant_id, user_id)
     if not result:
         raise _not_found("CV variant")
     return result
 
 
-def latest_variant_version(db: Session, variant_id: str) -> CvVariantVersion:
-    version = db.scalar(
-        select(CvVariantVersion)
-        .where(CvVariantVersion.variant_id == variant_id)
-        .order_by(CvVariantVersion.version.desc())
-        .limit(1)
-    )
+def latest_variant_version(uow: UnitOfWork, variant_id: str) -> CvVariantVersion:
+    version = uow.recommendations.latest_variant_version(variant_id)
     if not version:
         raise _not_found("CV variant version")
     return version
 
 
-def serialize_variant(db: Session, variant: CvVariant) -> CvVariantRead:
+def serialize_variant(uow: UnitOfWork, variant: CvVariant) -> CvVariantRead:
     return CvVariantRead(
         **{
             column: getattr(variant, column)
@@ -639,30 +585,30 @@ def serialize_variant(db: Session, variant: CvVariant) -> CvVariantRead:
                 "updated_at",
             )
         },
-        latest_version=CvVariantVersionRead.model_validate(latest_variant_version(db, variant.id)),
+        latest_version=CvVariantVersionRead.model_validate(latest_variant_version(uow, variant.id)),
     )
 
 
-def compare_variant(db: Session, user_id: str, variant_id: str) -> CvVariantComparison:
-    variant = owned_variant(db, user_id, variant_id)
-    base = db.get(ProfileVersion, variant.base_profile_version_id)
+def compare_variant(uow: UnitOfWork, user_id: str, variant_id: str) -> CvVariantComparison:
+    variant = owned_variant(uow, user_id, variant_id)
+    base = uow.candidates.get_profile_version(variant.base_profile_version_id, user_id)
     if not base:
         raise HTTPException(status_code=409, detail="The approved base CV version is unavailable")
-    version = latest_variant_version(db, variant.id)
+    version = latest_variant_version(uow, variant.id)
     applied = [
         item
-        for item in _recommendations(db, variant.analysis_run_id)
+        for item in _recommendations(uow, variant.analysis_run_id)
         if item.id in set(version.applied_recommendation_ids)
     ]
     return CvVariantComparison(
         master=CvProfileDraft.model_validate(base.snapshot),
         variant=CvProfileDraft.model_validate(version.content),
-        applied_recommendations=[serialize_recommendation(db, item) for item in applied],
+        applied_recommendations=[serialize_recommendation(uow, item) for item in applied],
         unchanged_master=True,
     )
 
 
-def remove_variant(db: Session, user: User, variant_id: str) -> None:
-    variant = owned_variant(db, user.id, variant_id)
-    write_audit(db, user.id, "cv_optimization.variant.deleted", "cv_variant", variant.id)
-    db.delete(variant)
+def remove_variant(uow: UnitOfWork, user: User, variant_id: str) -> None:
+    variant = owned_variant(uow, user.id, variant_id)
+    write_audit(uow, user.id, "cv_optimization.variant.deleted", "cv_variant", variant.id)
+    uow.delete(variant)

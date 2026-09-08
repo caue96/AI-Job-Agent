@@ -1,13 +1,11 @@
 from datetime import date, datetime, timedelta
 
 import pytest
-from fastapi import HTTPException
 from sqlalchemy import select
 
 from app.config import get_settings
 from app.cv import (
     LocalCvStorage,
-    UploadRateLimiter,
     calculate_experience_years,
     ground_provider_draft,
     normalize_draft,
@@ -17,6 +15,7 @@ from app.cv import (
 from app.cv_ai import empty_draft, found, list_found
 from app.cv_schemas import CvEmployment
 from app.models import CvImport, CvImportStatus, User
+from app.repositories import SqlAlchemyUnitOfWork
 
 
 def test_grounding_removes_unsupported_provider_claims():
@@ -73,15 +72,20 @@ def test_filename_sanitization_and_storage_key_path_guard(tmp_path):
         storage.path_for("../secret.pdf")
 
 
-def test_upload_rate_limiter_is_per_user_and_deterministic():
-    limiter = UploadRateLimiter()
+def test_upload_rate_limiter_is_database_backed_and_per_user(client):
+    client.get("/v1/cv-imports")
+    db = client.app.state.test_session
+    first = User(email="rate-one@example.invalid")
+    second = User(email="rate-two@example.invalid")
+    db.add_all([first, second])
+    db.flush()
+    repository = SqlAlchemyUnitOfWork(db).cvs
     now = datetime(2026, 7, 12)
-    limiter.check("one", 1, now)
-    limiter.check("two", 1, now)
-    with pytest.raises(HTTPException) as exc:
-        limiter.check("one", 1, now + timedelta(seconds=30))
-    assert exc.value.status_code == 429
-    limiter.check("one", 1, now + timedelta(seconds=61))
+    assert repository.record_upload_attempt(first.id, 1, now)
+    assert repository.record_upload_attempt(second.id, 1, now)
+    assert not repository.record_upload_attempt(first.id, 1, now + timedelta(seconds=30))
+    assert repository.record_upload_attempt(first.id, 1, now + timedelta(seconds=61))
+    db.rollback()
 
 
 def test_retention_deletes_only_file_and_preserves_import_record(client):
@@ -110,7 +114,7 @@ def test_retention_deletes_only_file_and_preserves_import_record(client):
     db.add(record)
     db.commit()
 
-    assert purge_expired_files(db, get_settings(), storage) == 1
+    assert purge_expired_files(SqlAlchemyUnitOfWork(db), get_settings(), storage) == 1
     db.commit()
 
     assert db.scalar(select(CvImport).where(CvImport.id == record.id)) is not None

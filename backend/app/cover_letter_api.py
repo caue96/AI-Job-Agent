@@ -4,8 +4,6 @@ from functools import lru_cache
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import FileResponse
-from sqlalchemy import select
-from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.cover_letter_ai import CoverLetterProvider, build_cover_letter_provider
@@ -17,7 +15,6 @@ from app.cover_letter_schemas import (
     DocumentExportRead,
 )
 from app.cover_letters import (
-    DOCUMENT_TYPE,
     approve_cover_letter,
     edit_cover_letter,
     generate_cover_letters,
@@ -29,14 +26,13 @@ from app.cover_letters import (
 )
 from app.cv_exports import LocalCvExportStorage, render_cover_letter_export
 from app.cv_optimization_api import get_cv_export_storage
-from app.db import get_db
 from app.models import (
-    Application,
     CoverLetterStatus,
     DocumentExport,
-    GeneratedDocument,
+    StoredFile,
 )
 from app.services import current_development_user, write_audit
+from app.unit_of_work import UnitOfWorkDependency
 
 router = APIRouter(prefix="/v1/cover-letters", tags=["cover-letters"])
 
@@ -49,121 +45,105 @@ def get_cover_letter_provider() -> CoverLetterProvider:
 @router.post("", response_model=list[CoverLetterRead], status_code=status.HTTP_201_CREATED)
 def generate(
     payload: CoverLetterGenerateRequest,
-    db: Session = Depends(get_db),
+    uow: UnitOfWorkDependency,
     provider: CoverLetterProvider = Depends(get_cover_letter_provider),
 ) -> list[CoverLetterRead]:
-    user = current_development_user(db)
-    records = generate_cover_letters(db, user, payload, provider)
-    db.commit()
+    user = current_development_user(uow)
+    records = generate_cover_letters(uow, user, payload, provider)
+    uow.commit()
     for record in records:
-        db.refresh(record)
-    return [serialize_cover_letter(db, record) for record in records]
+        uow.refresh(record)
+    return [serialize_cover_letter(uow, record, user.id) for record in records]
 
 
 @router.get("", response_model=list[CoverLetterRead])
 def list_letters(
+    uow: UnitOfWorkDependency,
     job_id: str | None = Query(default=None, max_length=36),
-    db: Session = Depends(get_db),
 ) -> list[CoverLetterRead]:
-    user = current_development_user(db)
-    statement = (
-        select(GeneratedDocument)
-        .join(Application)
-        .where(
-            Application.user_id == user.id,
-            GeneratedDocument.document_type == DOCUMENT_TYPE,
-        )
-    )
-    if job_id:
-        statement = statement.where(GeneratedDocument.job_id == job_id)
-    records = list(db.scalars(statement.order_by(GeneratedDocument.created_at.desc()).limit(100)))
-    return [serialize_cover_letter(db, record) for record in records]
+    user = current_development_user(uow)
+    records = uow.cover_letters.list_letters(user.id, job_id)
+    return [serialize_cover_letter(uow, record, user.id) for record in records]
 
 
 @router.get("/{document_id}", response_model=CoverLetterRead)
-def read_letter(document_id: str, db: Session = Depends(get_db)) -> CoverLetterRead:
-    user = current_development_user(db)
-    return serialize_cover_letter(db, owned_cover_letter(db, user.id, document_id))
+def read_letter(document_id: str, uow: UnitOfWorkDependency) -> CoverLetterRead:
+    user = current_development_user(uow)
+    return serialize_cover_letter(uow, owned_cover_letter(uow, user.id, document_id), user.id)
 
 
 @router.patch("/{document_id}", response_model=CoverLetterRead, status_code=201)
 def edit_letter(
     document_id: str,
     payload: CoverLetterEditRequest,
-    db: Session = Depends(get_db),
+    uow: UnitOfWorkDependency,
 ) -> CoverLetterRead:
-    user = current_development_user(db)
-    record = edit_cover_letter(db, user, document_id, payload)
-    db.commit()
-    db.refresh(record)
-    return serialize_cover_letter(db, record)
+    user = current_development_user(uow)
+    record = edit_cover_letter(uow, user, document_id, payload)
+    uow.commit()
+    uow.refresh(record)
+    return serialize_cover_letter(uow, record, user.id)
 
 
 @router.post("/{document_id}/validate", response_model=CoverLetterRead)
-def validate_letter(document_id: str, db: Session = Depends(get_db)) -> CoverLetterRead:
-    user = current_development_user(db)
-    record = revalidate_cover_letter(db, user, document_id)
-    db.commit()
-    db.refresh(record)
-    return serialize_cover_letter(db, record)
+def validate_letter(document_id: str, uow: UnitOfWorkDependency) -> CoverLetterRead:
+    user = current_development_user(uow)
+    record = revalidate_cover_letter(uow, user, document_id)
+    uow.commit()
+    uow.refresh(record)
+    return serialize_cover_letter(uow, record, user.id)
 
 
 @router.post("/{document_id}/select", response_model=CoverLetterRead)
-def select_letter(document_id: str, db: Session = Depends(get_db)) -> CoverLetterRead:
-    user = current_development_user(db)
-    record = select_cover_letter(db, user, document_id)
-    db.commit()
-    db.refresh(record)
-    return serialize_cover_letter(db, record)
+def select_letter(document_id: str, uow: UnitOfWorkDependency) -> CoverLetterRead:
+    user = current_development_user(uow)
+    record = select_cover_letter(uow, user, document_id)
+    uow.commit()
+    uow.refresh(record)
+    return serialize_cover_letter(uow, record, user.id)
 
 
 @router.post("/{document_id}/approve", response_model=CoverLetterRead)
-def approve_letter(document_id: str, db: Session = Depends(get_db)) -> CoverLetterRead:
-    user = current_development_user(db)
-    record = approve_cover_letter(db, user, document_id)
-    db.commit()
-    db.refresh(record)
-    return serialize_cover_letter(db, record)
+def approve_letter(document_id: str, uow: UnitOfWorkDependency) -> CoverLetterRead:
+    user = current_development_user(uow)
+    record = approve_cover_letter(uow, user, document_id)
+    uow.commit()
+    uow.refresh(record)
+    return serialize_cover_letter(uow, record, user.id)
 
 
 @router.post("/{document_id}/regenerate", response_model=list[CoverLetterRead], status_code=201)
 def regenerate_letter(
     document_id: str,
-    db: Session = Depends(get_db),
+    uow: UnitOfWorkDependency,
     provider: CoverLetterProvider = Depends(get_cover_letter_provider),
 ) -> list[CoverLetterRead]:
-    user = current_development_user(db)
-    source = owned_cover_letter(db, user.id, document_id)
-    records = generate_cover_letters(db, user, request_from_configuration(source), provider)
-    db.commit()
+    user = current_development_user(uow)
+    source = owned_cover_letter(uow, user.id, document_id)
+    records = generate_cover_letters(uow, user, request_from_configuration(source), provider)
+    uow.commit()
     for record in records:
-        db.refresh(record)
-    return [serialize_cover_letter(db, record) for record in records]
+        uow.refresh(record)
+    return [serialize_cover_letter(uow, record, user.id) for record in records]
 
 
 @router.delete("/{document_id}", status_code=204)
 def delete_letter(
     document_id: str,
-    db: Session = Depends(get_db),
+    uow: UnitOfWorkDependency,
     storage: LocalCvExportStorage = Depends(get_cv_export_storage),
 ) -> None:
-    user = current_development_user(db)
-    record = owned_cover_letter(db, user.id, document_id, lock=True)
+    user = current_development_user(uow)
+    record = owned_cover_letter(uow, user.id, document_id, lock=True)
     if record.cover_letter_status in {
         CoverLetterStatus.APPROVED,
         CoverLetterStatus.EXPORTED,
     }:
         raise HTTPException(status_code=409, detail="Approved cover letters cannot be deleted")
-    keys = list(
-        db.scalars(
-            select(DocumentExport.storage_key).where(
-                DocumentExport.generated_document_id == record.id
-            )
-        )
-    )
-    write_audit(db, user.id, "cover_letter.deleted", "generated_document", record.id)
-    db.delete(record)
-    db.commit()
+    keys = uow.cover_letters.export_keys(record.id)
+    write_audit(uow, user.id, "cover_letter.deleted", "generated_document", record.id)
+    uow.delete(record)
+    uow.commit()
     for key in keys:
         storage.delete(key)
 
@@ -172,22 +152,17 @@ def delete_letter(
 def export_letter(
     document_id: str,
     payload: CoverLetterExportRequest,
-    db: Session = Depends(get_db),
+    uow: UnitOfWorkDependency,
     storage: LocalCvExportStorage = Depends(get_cv_export_storage),
 ) -> DocumentExport:
-    user = current_development_user(db)
-    record = owned_cover_letter(db, user.id, document_id, lock=True)
+    user = current_development_user(uow)
+    record = owned_cover_letter(uow, user.id, document_id, lock=True)
     if record.cover_letter_status not in {
         CoverLetterStatus.APPROVED,
         CoverLetterStatus.EXPORTED,
     }:
         raise HTTPException(status_code=409, detail="Approve the cover letter before export")
-    existing = db.scalar(
-        select(DocumentExport).where(
-            DocumentExport.generated_document_id == record.id,
-            DocumentExport.format == payload.format,
-        )
-    )
+    existing = uow.cover_letters.export(record.id, payload.format)
     if existing:
         return existing
     from app.cover_letter_schemas import CoverLetterContent
@@ -203,10 +178,27 @@ def export_letter(
         sha256=digest,
         size_bytes=size,
     )
-    db.add(export)
+    uow.add(export)
+    uow.flush()
+    media_types = {
+        "txt": "text/plain; charset=utf-8",
+        "pdf": "application/pdf",
+        "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    }
+    uow.add(
+        StoredFile(
+            owner_id=user.id,
+            document_export_id=export.id,
+            storage_key=key,
+            original_filename=f"cover-letter.{payload.format}",
+            media_type=media_types[payload.format],
+            size_bytes=size,
+            sha256=digest,
+        )
+    )
     record.cover_letter_status = CoverLetterStatus.EXPORTED
     write_audit(
-        db,
+        uow,
         user.id,
         "cover_letter.exported",
         "generated_document",
@@ -214,27 +206,22 @@ def export_letter(
         {"format": payload.format, "size_bytes": size},
     )
     try:
-        db.commit()
+        uow.commit()
     except Exception:
         storage.delete(key)
         raise
-    db.refresh(export)
+    uow.refresh(export)
     return export
 
 
 @router.get("/exports/{export_id}/download", response_class=FileResponse)
 def download_export(
     export_id: str,
-    db: Session = Depends(get_db),
+    uow: UnitOfWorkDependency,
     storage: LocalCvExportStorage = Depends(get_cv_export_storage),
 ) -> FileResponse:
-    user = current_development_user(db)
-    record = db.scalar(
-        select(DocumentExport)
-        .join(GeneratedDocument)
-        .join(Application)
-        .where(DocumentExport.id == export_id, Application.user_id == user.id)
-    )
+    user = current_development_user(uow)
+    record = uow.cover_letters.export_for_download(export_id, user.id)
     if not record:
         raise HTTPException(status_code=404, detail="Cover-letter export not found")
     media_types = {

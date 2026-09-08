@@ -4,9 +4,6 @@ import hashlib
 from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import HTTPException, status
-from sqlalchemy import func, or_, select
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
 
 from app.ai import (
     PROMPT_VERSION,
@@ -23,7 +20,6 @@ from app.models import (
     Application,
     ApplicationStatus,
     ApplicationStatusHistory,
-    AuditLog,
     CandidateProfile,
     EmploymentEntry,
     GeneratedDocument,
@@ -31,8 +27,10 @@ from app.models import (
     Job,
     ProfileLanguage,
     ProfileSkill,
+    ProfileVersion,
     User,
 )
+from app.repositories.contracts import PersistenceConflict, UnitOfWork
 from app.schemas import (
     ApplicationCreate,
     ApplicationTransition,
@@ -43,6 +41,7 @@ from app.schemas import (
     JobCreate,
     MatchAnalysisRead,
     ProfileCreate,
+    ProfileRead,
     ProfileUpdate,
 )
 
@@ -101,36 +100,28 @@ def job_content_hash(payload: JobCreate) -> str:
 
 
 def write_audit(
-    db: Session,
+    uow: UnitOfWork,
     user_id: str,
     action: str,
     entity_type: str,
     entity_id: str,
     metadata: dict | None = None,
 ) -> None:
-    db.add(
-        AuditLog(
-            user_id=user_id,
-            action=action,
-            entity_type=entity_type,
-            entity_id=entity_id,
-            metadata_json=metadata or {},
-        )
-    )
+    uow.audit(user_id, action, entity_type, entity_id, metadata)
 
 
-def current_development_user(db: Session) -> User:
-    user = db.scalar(select(User).where(User.email == "local@example.invalid"))
+def current_development_user(uow: UnitOfWork) -> User:
+    user = uow.get_user_by_email("local@example.invalid")
     if user:
         return user
     user = User(email="local@example.invalid")
-    db.add(user)
+    uow.add(user)
     try:
-        db.flush()
-    except IntegrityError:
+        uow.flush()
+    except PersistenceConflict:
         # Two first requests can race while bootstrapping the local-only identity.
-        db.rollback()
-        user = db.scalar(select(User).where(User.email == "local@example.invalid"))
+        uow.rollback()
+        user = uow.get_user_by_email("local@example.invalid")
         if user is None:
             raise
     return user
@@ -154,54 +145,78 @@ def apply_profile_details(
         ]
 
 
-def create_profile(db: Session, payload: ProfileCreate, user: User) -> CandidateProfile:
-    if db.scalar(select(CandidateProfile).where(CandidateProfile.user_id == user.id)):
+def _save_profile_version(
+    uow: UnitOfWork, profile: CandidateProfile, strategy: str
+) -> ProfileVersion:
+    snapshot = ProfileRead.model_validate(profile).model_dump(
+        mode="json", exclude={"id", "created_at", "updated_at"}
+    )
+    version = ProfileVersion(
+        user_id=profile.user_id,
+        profile_id=profile.id,
+        version=uow.candidates.next_profile_version(profile.id),
+        strategy=strategy,
+        snapshot=snapshot,
+    )
+    uow.add(version)
+    return version
+
+
+def create_profile(uow: UnitOfWork, payload: ProfileCreate, user: User) -> CandidateProfile:
+    if uow.candidates.get_profile(user.id):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Profile already exists")
     profile = CandidateProfile(
         user_id=user.id, full_name=payload.full_name, email=str(payload.email)
     )
     apply_profile_details(profile, payload)
-    db.add(profile)
+    uow.add(profile)
     try:
-        db.flush()
-    except IntegrityError as exc:
-        db.rollback()
+        uow.candidates.sync_skills(profile)
+        uow.flush()
+        _save_profile_version(uow, profile, "manual")
+    except PersistenceConflict as exc:
+        uow.rollback()
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail="Profile already exists"
         ) from exc
-    write_audit(db, user.id, "profile.created", "candidate_profile", profile.id)
+    write_audit(uow, user.id, "profile.created", "candidate_profile", profile.id)
     return profile
 
 
-def create_job(db: Session, payload: JobCreate, actor_id: str) -> Job:
+def update_candidate_profile(
+    uow: UnitOfWork, payload: ProfileUpdate, user: User
+) -> CandidateProfile:
+    profile = uow.candidates.get_profile(user.id, lock=True)
+    if not profile:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Profile not found")
+    apply_profile_details(profile, payload)
+    uow.candidates.sync_skills(profile)
+    uow.flush()
+    _save_profile_version(uow, profile, "manual_update")
+    write_audit(uow, user.id, "profile.updated", "candidate_profile", profile.id)
+    return profile
+
+
+def create_job(uow: UnitOfWork, payload: JobCreate, actor_id: str) -> Job:
     normalized = normalize_url(str(payload.url) if payload.url else None)
     content_hash = job_content_hash(payload)
-    duplicate_conditions = [Job.content_hash == content_hash]
-    if payload.external_job_id:
-        duplicate_conditions.append(
-            (Job.source == payload.source) & (Job.external_job_id == payload.external_job_id)
-        )
-    if normalized:
-        duplicate_conditions.append(Job.normalized_url == normalized)
-    duplicates = db.execute(
-        select(Job.source, Job.external_job_id, Job.normalized_url, Job.content_hash).where(
-            or_(*duplicate_conditions)
-        )
-    ).all()
+    duplicates = uow.jobs.duplicate_candidates(
+        payload.source, payload.external_job_id, normalized, content_hash
+    )
     if payload.external_job_id:
         if any(
-            job.source == payload.source and job.external_job_id == payload.external_job_id
-            for job in duplicates
+            duplicate[0] == payload.source and duplicate[1] == payload.external_job_id
+            for duplicate in duplicates
         ):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT, detail="Duplicate source and external job ID"
             )
     if normalized:
-        if any(job.normalized_url == normalized for job in duplicates):
+        if any(duplicate[2] == normalized for duplicate in duplicates):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT, detail="Duplicate normalized job URL"
             )
-    if any(job.content_hash == content_hash for job in duplicates):
+    if any(duplicate[3] == content_hash for duplicate in duplicates):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Duplicate job content")
     job = Job(
         **payload.model_dump(exclude={"url"}),
@@ -209,43 +224,40 @@ def create_job(db: Session, payload: JobCreate, actor_id: str) -> Job:
         normalized_url=normalized,
         content_hash=content_hash,
     )
-    db.add(job)
+    uow.add(job)
     try:
-        db.flush()
-    except IntegrityError as exc:
-        db.rollback()
+        uow.flush()
+        uow.jobs.save_version(job)
+    except PersistenceConflict as exc:
+        uow.rollback()
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Job duplicates an existing vacancy",
         ) from exc
-    write_audit(db, actor_id, "job.created", "job", job.id, {"source": job.source})
+    write_audit(uow, actor_id, "job.created", "job", job.id, {"source": job.source})
     return job
 
 
-def create_application(db: Session, payload: ApplicationCreate, user: User) -> Application:
-    if not db.get(Job, payload.job_id):
+def create_application(uow: UnitOfWork, payload: ApplicationCreate, user: User) -> Application:
+    if not uow.jobs.get(payload.job_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
-    existing = db.scalar(
-        select(Application).where(
-            Application.user_id == user.id, Application.job_id == payload.job_id
-        )
-    )
+    existing = uow.applications.get_for_job(user.id, payload.job_id)
     if existing:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Application already exists for this job",
         )
     application = Application(user_id=user.id, job_id=payload.job_id, notes=payload.notes)
-    db.add(application)
+    uow.add(application)
     try:
-        db.flush()
-    except IntegrityError as exc:
-        db.rollback()
+        uow.flush()
+    except PersistenceConflict as exc:
+        uow.rollback()
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Application already exists for this job",
         ) from exc
-    db.add(
+    uow.add(
         ApplicationStatusHistory(
             application_id=application.id,
             from_status=None,
@@ -254,12 +266,12 @@ def create_application(db: Session, payload: ApplicationCreate, user: User) -> A
             actor_id=user.id,
         )
     )
-    write_audit(db, user.id, "application.created", "application", application.id)
+    write_audit(uow, user.id, "application.created", "application", application.id)
     return application
 
 
 def transition_application(
-    db: Session, application: Application, actor_id: str, command: ApplicationTransition
+    uow: UnitOfWork, application: Application, actor_id: str, command: ApplicationTransition
 ) -> Application:
     source = application.status
     target = command.to_status
@@ -277,7 +289,7 @@ def transition_application(
             detail="Explicit user approval is required",
         )
     application.status = target
-    db.add(
+    uow.add(
         ApplicationStatusHistory(
             application_id=application.id,
             from_status=source,
@@ -287,19 +299,19 @@ def transition_application(
         )
     )
     write_audit(
-        db,
+        uow,
         actor_id,
         "application.status_changed",
         "application",
         application.id,
         {"from": source.value, "to": target.value, "explicit_approval": command.approved_by_user},
     )
-    db.flush()
+    uow.flush()
     return application
 
 
 def analyze_application(
-    db: Session,
+    uow: UnitOfWork,
     application: Application,
     profile: CandidateProfile,
     job: Job,
@@ -316,7 +328,7 @@ def analyze_application(
     application.match_analysis = analysis.model_dump(mode="json")
     if application.status == ApplicationStatus.DISCOVERED:
         application.status = ApplicationStatus.ANALYZED
-        db.add(
+        uow.add(
             ApplicationStatusHistory(
                 application_id=application.id,
                 from_status=ApplicationStatus.DISCOVERED,
@@ -326,7 +338,7 @@ def analyze_application(
             )
         )
     write_audit(
-        db,
+        uow,
         actor_id,
         "application.analyzed",
         "application",
@@ -337,7 +349,7 @@ def analyze_application(
             "hard_rejected": analysis.hard_rejected,
         },
     )
-    db.flush()
+    uow.flush()
     return analysis
 
 
@@ -368,7 +380,7 @@ def serialize_generated_document(document: GeneratedDocument) -> GeneratedDocume
 
 
 def generate_application_documents(
-    db: Session,
+    uow: UnitOfWork,
     application: Application,
     profile: CandidateProfile,
     job: Job,
@@ -380,7 +392,7 @@ def generate_application_documents(
     facts = profile_facts(profile)
     # End the read transaction before the potentially slow external call. Objects remain
     # usable because request sessions do not expire state on commit.
-    db.commit()
+    uow.commit()
     try:
         plan, metadata = provider.select_plan(
             profile=profile, job=job, facts=facts, language=request.language
@@ -393,16 +405,11 @@ def generate_application_documents(
             detail="Document generation provider is temporarily unavailable",
         ) from exc
     validation = validate_grounding(package, facts, job)
-    db.refresh(application, with_for_update=True)
+    uow.refresh(application, lock=True)
     ensure_document_generation_allowed(application)
-    previous_version = db.scalar(
-        select(func.max(GeneratedDocument.version)).where(
-            GeneratedDocument.application_id == application.id
-        )
-    )
     document = GeneratedDocument(
         application_id=application.id,
-        version=(previous_version or 0) + 1,
+        version=uow.applications.next_document_version(application.id),
         language=request.language,
         status=GeneratedDocumentStatus.VALID
         if validation.valid
@@ -418,10 +425,10 @@ def generate_application_documents(
         estimated_cost_usd=metadata.estimated_cost_usd,
         latency_ms=metadata.latency_ms,
     )
-    db.add(document)
-    db.flush()
+    uow.add(document)
+    uow.flush()
     write_audit(
-        db,
+        uow,
         actor_id,
         "application.documents_generated",
         "generated_document",
@@ -438,7 +445,7 @@ def generate_application_documents(
     )
     if validation.valid and application.status == ApplicationStatus.SHORTLISTED:
         application.status = ApplicationStatus.DOCUMENTS_PREPARED
-        db.add(
+        uow.add(
             ApplicationStatusHistory(
                 application_id=application.id,
                 from_status=ApplicationStatus.SHORTLISTED,
@@ -447,7 +454,7 @@ def generate_application_documents(
                 actor_id=actor_id,
             )
         )
-    db.flush()
+    uow.flush()
     return document
 
 

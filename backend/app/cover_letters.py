@@ -11,8 +11,6 @@ from hashlib import sha256
 from typing import Literal
 
 from fastapi import HTTPException, status
-from sqlalchemy import func, select, update
-from sqlalchemy.orm import Session
 
 from app.ai import AIProviderError, sponsorship_claim
 from app.cover_letter_ai import (
@@ -39,6 +37,7 @@ from app.matching import extracted_skills
 from app.models import (
     Application,
     CandidateProfile,
+    ClaimValidationRun,
     CoverLetterStatus,
     DiscoveryMatchResult,
     GeneratedDocument,
@@ -47,6 +46,10 @@ from app.models import (
     ProfileVersion,
     User,
 )
+from app.models import (
+    ClaimValidationIssue as ClaimValidationIssueRecord,
+)
+from app.repositories import UnitOfWork
 from app.services import write_audit
 
 DOCUMENT_TYPE = "COVER_LETTER"
@@ -115,13 +118,8 @@ def _text(value: CvValue) -> str:
     return "" if value.value is None else str(value.value).strip()
 
 
-def latest_profile_version(db: Session, user_id: str) -> ProfileVersion:
-    record = db.scalar(
-        select(ProfileVersion)
-        .where(ProfileVersion.user_id == user_id)
-        .order_by(ProfileVersion.version.desc(), ProfileVersion.created_at.desc())
-        .limit(1)
-    )
+def latest_profile_version(uow: UnitOfWork, user_id: str) -> ProfileVersion:
+    record = uow.candidates.latest_profile_version(user_id)
     if not record:
         raise HTTPException(
             status_code=409,
@@ -130,13 +128,8 @@ def latest_profile_version(db: Session, user_id: str) -> ProfileVersion:
     return record
 
 
-def latest_match(db: Session, user_id: str, job_id: str) -> DiscoveryMatchResult:
-    record = db.scalar(
-        select(DiscoveryMatchResult)
-        .where(DiscoveryMatchResult.user_id == user_id, DiscoveryMatchResult.job_id == job_id)
-        .order_by(DiscoveryMatchResult.created_at.desc())
-        .limit(1)
-    )
+def latest_match(uow: UnitOfWork, user_id: str, job_id: str) -> DiscoveryMatchResult:
+    record = uow.discovery.latest_match(user_id, job_id)
     if not record:
         raise HTTPException(
             status_code=409,
@@ -692,32 +685,48 @@ def _job_hash(job: Job) -> str:
     ).hexdigest()
 
 
-def _next_version(db: Session, application_id: str) -> int:
-    current = db.scalar(
-        select(func.max(GeneratedDocument.version)).where(
-            GeneratedDocument.application_id == application_id
-        )
+def _next_version(uow: UnitOfWork, application_id: str) -> int:
+    return uow.applications.next_document_version(application_id)
+
+
+def _record_validation(
+    uow: UnitOfWork, document_id: str, validation: CoverLetterValidation
+) -> None:
+    run = ClaimValidationRun(
+        generated_document_id=document_id,
+        valid=validation.valid,
+        checked_claims=validation.checked_claims,
+        validator_version="cover-letter-v1",
     )
-    return (current or 0) + 1
+    uow.add(run)
+    uow.flush()
+    uow.add_all(
+        ClaimValidationIssueRecord(
+            validation_run_id=run.id,
+            code=issue.code,
+            message=issue.message,
+            paragraph_index=issue.paragraph_index,
+            evidence={"text": issue.text},
+        )
+        for issue in validation.issues
+    )
 
 
 def generate_cover_letters(
-    db: Session,
+    uow: UnitOfWork,
     user: User,
     request: CoverLetterGenerateRequest,
     provider: CoverLetterProvider,
 ) -> list[GeneratedDocument]:
-    job = db.get(Job, request.job_id)
+    job = uow.jobs.get(request.job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    match = latest_match(db, user.id, job.id)
-    profile_version = latest_profile_version(db, user.id)
-    candidate_profile = db.scalar(
-        select(CandidateProfile).where(CandidateProfile.user_id == user.id)
-    )
+    match = latest_match(uow, user.id, job.id)
+    profile_version = latest_profile_version(uow, user.id)
+    candidate_profile = uow.candidates.get_profile(user.id)
     if not candidate_profile:
         raise HTTPException(status_code=409, detail="Candidate profile is required")
-    application = prepare_application(db, user, match)
+    application = prepare_application(uow, user, match)
     profile = CvProfileDraft.model_validate(profile_version.snapshot)
     facts = cover_letter_facts(profile)
     company_facts = verified_company_facts(job)
@@ -731,8 +740,8 @@ def generate_cover_letters(
         "match_id": match.id,
         "application_id": application.id,
     }
-    db.expunge(job)
-    db.commit()
+    uow.detach(job)
+    uow.commit()
     try:
         plan_set, metadata = provider.select_plans(
             job=job,
@@ -743,10 +752,12 @@ def generate_cover_letters(
         )
     except AIProviderError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    current_job = db.get(Job, input_state["job_id"])
-    current_profile_version = db.get(ProfileVersion, input_state["profile_version_id"])
-    current_match = db.get(DiscoveryMatchResult, input_state["match_id"])
-    current_application = db.get(Application, input_state["application_id"])
+    current_job = uow.jobs.get(input_state["job_id"])
+    current_profile_version = uow.candidates.get_profile_version(
+        input_state["profile_version_id"], user.id
+    )
+    current_match = uow.discovery.get_match(input_state["match_id"], user.id)
+    current_application = uow.applications.get_owned(input_state["application_id"], user.id)
     if (
         not current_job
         or _job_hash(current_job) != input_state["job_hash"]
@@ -760,14 +771,8 @@ def generate_cover_letters(
     ):
         raise HTTPException(status_code=409, detail="Cover-letter inputs changed; retry")
     application = current_application
-    db.refresh(application, with_for_update=True)
-    existing_selected = db.scalar(
-        select(GeneratedDocument.id).where(
-            GeneratedDocument.application_id == application.id,
-            GeneratedDocument.document_type == DOCUMENT_TYPE,
-            GeneratedDocument.selected.is_(True),
-        )
-    )
+    uow.refresh(application, lock=True)
+    existing_selected = uow.cover_letters.selected_id(application.id)
     records: list[GeneratedDocument] = []
     configuration = request_with_language.model_dump(mode="json")
     configuration.update(
@@ -796,7 +801,7 @@ def generate_cover_letters(
             document_type=DOCUMENT_TYPE,
             job_id=current_job.id,
             profile_version_id=current_profile_version.id,
-            version=_next_version(db, application.id),
+            version=_next_version(uow, application.id),
             language=language,
             status=(
                 GeneratedDocumentStatus.VALID
@@ -822,11 +827,12 @@ def generate_cover_letters(
             configuration_json=configuration,
             selected=existing_selected is None and not records,
         )
-        db.add(record)
-        db.flush()
+        uow.add(record)
+        uow.flush()
+        _record_validation(uow, record.id, validation)
         records.append(record)
         write_audit(
-            db,
+            uow,
             user.id,
             "cover_letter.generated",
             "generated_document",
@@ -843,20 +849,9 @@ def generate_cover_letters(
 
 
 def owned_cover_letter(
-    db: Session, user_id: str, document_id: str, lock: bool = False
+    uow: UnitOfWork, user_id: str, document_id: str, lock: bool = False
 ) -> GeneratedDocument:
-    statement = (
-        select(GeneratedDocument)
-        .join(Application)
-        .where(
-            GeneratedDocument.id == document_id,
-            GeneratedDocument.document_type == DOCUMENT_TYPE,
-            Application.user_id == user_id,
-        )
-    )
-    if lock:
-        statement = statement.with_for_update()
-    record = db.scalar(statement)
+    record = uow.cover_letters.get(document_id, user_id, lock=lock)
     if not record:
         raise HTTPException(status_code=404, detail="Cover letter not found")
     return record
@@ -885,11 +880,13 @@ def _evidence_for(
     return evidence
 
 
-def serialize_cover_letter(db: Session, record: GeneratedDocument) -> CoverLetterRead:
+def serialize_cover_letter(
+    uow: UnitOfWork, record: GeneratedDocument, user_id: str
+) -> CoverLetterRead:
     if not record.profile_version_id or not record.job_id or not record.cover_letter_status:
         raise HTTPException(status_code=409, detail="Cover-letter metadata is incomplete")
-    profile_version = db.get(ProfileVersion, record.profile_version_id)
-    job = db.get(Job, record.job_id)
+    profile_version = uow.candidates.get_profile_version(record.profile_version_id, user_id)
+    job = uow.jobs.get(record.job_id)
     if not profile_version or not job:
         raise HTTPException(status_code=409, detail="Cover-letter evidence is unavailable")
     profile = CvProfileDraft.model_validate(profile_version.snapshot)
@@ -926,12 +923,14 @@ def serialize_cover_letter(db: Session, record: GeneratedDocument) -> CoverLette
 
 
 def edit_cover_letter(
-    db: Session,
+    uow: UnitOfWork,
     user: User,
     document_id: str,
     payload: CoverLetterEditRequest,
 ) -> GeneratedDocument:
-    parent = owned_cover_letter(db, user.id, document_id, lock=True)
+    parent = owned_cover_letter(uow, user.id, document_id, lock=True)
+    if not parent.profile_version_id or not parent.job_id:
+        raise HTTPException(status_code=409, detail="Cover-letter metadata is incomplete")
     content = CoverLetterContent.model_validate(copy.deepcopy(parent.content))
     if len(payload.paragraphs) != len(content.paragraphs):
         raise HTTPException(
@@ -943,31 +942,24 @@ def edit_cover_letter(
     for paragraph, text in zip(content.paragraphs, payload.paragraphs, strict=True):
         paragraph.text = text
     content.word_count = sum(len(item.text.split()) for item in content.paragraphs)
-    profile_version = db.get(ProfileVersion, parent.profile_version_id)
-    job = db.get(Job, parent.job_id)
-    application = db.get(Application, parent.application_id)
-    if not profile_version or not job or not application or application.user_id != user.id:
+    profile_version = uow.candidates.get_profile_version(parent.profile_version_id, user.id)
+    job = uow.jobs.get(parent.job_id)
+    application = uow.applications.get_owned(parent.application_id, user.id)
+    if not profile_version or not job or not application:
         raise HTTPException(status_code=409, detail="Cover-letter inputs are unavailable")
     facts = cover_letter_facts(CvProfileDraft.model_validate(profile_version.snapshot))
     validation = validate_cover_letter(
         content, facts, verified_company_facts(job), parent.configuration_json
     )
-    db.refresh(application, with_for_update=True)
-    db.execute(
-        update(GeneratedDocument)
-        .where(
-            GeneratedDocument.application_id == application.id,
-            GeneratedDocument.document_type == DOCUMENT_TYPE,
-        )
-        .values(selected=False)
-    )
+    uow.refresh(application, lock=True)
+    uow.cover_letters.clear_selection(application.id)
     record = GeneratedDocument(
         application_id=application.id,
         document_type=DOCUMENT_TYPE,
         job_id=parent.job_id,
         profile_version_id=parent.profile_version_id,
         parent_document_id=parent.id,
-        version=_next_version(db, application.id),
+        version=_next_version(uow, application.id),
         language=parent.language,
         status=(
             GeneratedDocumentStatus.VALID if validation.valid else GeneratedDocumentStatus.INVALID
@@ -989,10 +981,11 @@ def edit_cover_letter(
         configuration_json=parent.configuration_json,
         selected=True,
     )
-    db.add(record)
-    db.flush()
+    uow.add(record)
+    uow.flush()
+    _record_validation(uow, record.id, validation)
     write_audit(
-        db,
+        uow,
         user.id,
         "cover_letter.edited",
         "generated_document",
@@ -1002,10 +995,12 @@ def edit_cover_letter(
     return record
 
 
-def revalidate_cover_letter(db: Session, user: User, document_id: str) -> GeneratedDocument:
-    record = owned_cover_letter(db, user.id, document_id, lock=True)
-    profile_version = db.get(ProfileVersion, record.profile_version_id)
-    job = db.get(Job, record.job_id)
+def revalidate_cover_letter(uow: UnitOfWork, user: User, document_id: str) -> GeneratedDocument:
+    record = owned_cover_letter(uow, user.id, document_id, lock=True)
+    if not record.profile_version_id or not record.job_id:
+        raise HTTPException(status_code=409, detail="Cover-letter metadata is incomplete")
+    profile_version = uow.candidates.get_profile_version(record.profile_version_id, user.id)
+    job = uow.jobs.get(record.job_id)
     if not profile_version or not job:
         raise HTTPException(status_code=409, detail="Cover-letter evidence is unavailable")
     validation = validate_cover_letter(
@@ -1015,6 +1010,7 @@ def revalidate_cover_letter(db: Session, user: User, document_id: str) -> Genera
         record.configuration_json,
     )
     record.validation = validation.model_dump(mode="json")
+    _record_validation(uow, record.id, validation)
     record.status = (
         GeneratedDocumentStatus.VALID if validation.valid else GeneratedDocumentStatus.INVALID
     )
@@ -1024,7 +1020,7 @@ def revalidate_cover_letter(db: Session, user: User, document_id: str) -> Genera
     }:
         record.cover_letter_status = CoverLetterStatus.VALIDATED
     write_audit(
-        db,
+        uow,
         user.id,
         "cover_letter.validated",
         "generated_document",
@@ -1034,34 +1030,27 @@ def revalidate_cover_letter(db: Session, user: User, document_id: str) -> Genera
     return record
 
 
-def select_cover_letter(db: Session, user: User, document_id: str) -> GeneratedDocument:
-    record = owned_cover_letter(db, user.id, document_id, lock=True)
-    db.execute(
-        update(GeneratedDocument)
-        .where(
-            GeneratedDocument.application_id == record.application_id,
-            GeneratedDocument.document_type == DOCUMENT_TYPE,
-        )
-        .values(selected=False)
-    )
+def select_cover_letter(uow: UnitOfWork, user: User, document_id: str) -> GeneratedDocument:
+    record = owned_cover_letter(uow, user.id, document_id, lock=True)
+    uow.cover_letters.clear_selection(record.application_id)
     record.selected = True
-    write_audit(db, user.id, "cover_letter.selected", "generated_document", record.id)
+    write_audit(uow, user.id, "cover_letter.selected", "generated_document", record.id)
     return record
 
 
-def approve_cover_letter(db: Session, user: User, document_id: str) -> GeneratedDocument:
-    record = revalidate_cover_letter(db, user, document_id)
+def approve_cover_letter(uow: UnitOfWork, user: User, document_id: str) -> GeneratedDocument:
+    record = revalidate_cover_letter(uow, user, document_id)
     validation = CoverLetterValidation.model_validate(record.validation)
     if not validation.valid or record.status != GeneratedDocumentStatus.VALID:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Unsupported claims must be resolved before approval",
         )
-    select_cover_letter(db, user, record.id)
+    select_cover_letter(uow, user, record.id)
     record.cover_letter_status = CoverLetterStatus.APPROVED
     record.approved_at = datetime.now(UTC)
     record.approved_by = user.id
-    write_audit(db, user.id, "cover_letter.approved", "generated_document", record.id)
+    write_audit(uow, user.id, "cover_letter.approved", "generated_document", record.id)
     return record
 
 

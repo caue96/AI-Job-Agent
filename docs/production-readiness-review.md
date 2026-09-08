@@ -54,10 +54,12 @@ recovers from a concurrent first request. Deterministic tests cover the conflict
 
 ### H6. SQLite did not enforce foreign keys
 
-SQLite connections used in development and tests accepted orphaned rows that PostgreSQL rejects.
+Legacy SQLite development and current isolated test connections could accept orphaned rows that
+PostgreSQL rejects.
 
-**Fix implemented:** the shared engine factory enables `PRAGMA foreign_keys=ON` on every SQLite
-connection, and test fixtures use that factory. A regression test proves orphan inserts fail.
+**Fix implemented:** PostgreSQL is now authoritative for development/runtime data. The shared engine
+factory still enables `PRAGMA foreign_keys=ON` for isolated SQLite tests and legacy-import checks;
+a regression test proves orphan inserts fail.
 
 ### H7. Provider errors and frontend selection races leaked through abstraction boundaries
 
@@ -83,11 +85,15 @@ backend image installs runtime dependencies only and runs under an unprivileged 
 - `/v1/jobs` and `/v1/applications` are unpaginated; large datasets will increase latency and frontend memory use.
 - `main.py` repeats application/profile/job context loading across handlers; a dependency or service helper would reduce route-level duplication.
 - The frontend is concentrated in one component, which makes independent UI testing and changes harder.
-- The project has only SQLite migration coverage locally. PostgreSQL migration/integration coverage should run in CI when a container runner is available.
+- The CI workflow now provisions PostgreSQL 16 integration coverage for JSONB, constraints, transactions,
+  concurrency, migration/import idempotence, and restart persistence. Operators still need a
+  release-specific staging migration and restore drill before any production deployment.
 
 ## Low-priority improvements
 
-- Replace broad JSON columns with typed child entities where querying/reporting becomes important.
+- Continue moving only query-critical extension data from JSONB into typed child entities as real
+  reporting requirements emerge; candidate skills/history, job requirements/skills/versions,
+  match evidence/components, extraction evidence, and validation issues are already normalized.
 - Add audit-retention and privacy-deletion policies before storing production data.
 - Separate frontend API types/client code from view components.
 

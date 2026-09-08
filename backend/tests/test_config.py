@@ -10,7 +10,17 @@ def test_production_mode_fails_closed_without_authentication_design():
 
 
 def test_development_mode_is_available_for_local_and_test_workflows():
-    assert Settings(app_env="development").app_env == "development"
+    settings = Settings(
+        app_env="development",
+        database_url="postgresql+psycopg://jobagent:test@localhost/jobagent",
+    )
+    assert settings.app_env == "development"
+
+
+def test_sqlite_is_restricted_to_test_and_migration_workflows():
+    with pytest.raises(ValidationError, match="SQLite is supported only"):
+        Settings(app_env="development", database_url="sqlite:///local.db")
+    assert Settings(app_env="test", database_url="sqlite:///:memory:").app_env == "test"
 
 
 def test_openai_mode_requires_api_key():

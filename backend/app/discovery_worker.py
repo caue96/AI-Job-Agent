@@ -9,14 +9,16 @@ import time
 from app.config import get_settings
 from app.db import SessionLocal
 from app.discovery import run_due_searches
+from app.repositories import SqlAlchemyUnitOfWork
 
 logger = logging.getLogger("app.discovery.worker")
 
 
 def tick() -> list[str]:
     with SessionLocal() as db:
-        run_ids = run_due_searches(db, get_settings())
-        db.commit()
+        uow = SqlAlchemyUnitOfWork(db)
+        run_ids = run_due_searches(uow, get_settings())
+        uow.commit()
         return run_ids
 
 

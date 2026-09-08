@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-import threading
 import uuid
-from collections import defaultdict, deque
 from datetime import UTC, date, datetime, timedelta
 from functools import partial
 from pathlib import Path
@@ -16,8 +14,6 @@ from fastapi import HTTPException, UploadFile, status
 from pydantic import EmailStr, TypeAdapter, ValidationError
 from pypdf import PdfReader
 from pypdf.errors import PdfReadError
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
 from app.ai import AIProviderError
@@ -32,14 +28,21 @@ from app.cv_schemas import (
 )
 from app.models import (
     CandidateProfile,
+    CvExtractedField,
+    CvExtractionEvidence,
+    CvExtractionRun,
+    CvFieldCorrection,
     CvImport,
     CvImportStatus,
     EmploymentEntry,
     ProfileLanguage,
     ProfileSkill,
     ProfileVersion,
+    RetentionStatus,
+    StoredFile,
     User,
 )
+from app.repositories.contracts import UnitOfWork
 from app.services import write_audit
 
 PDF_MEDIA_TYPES = {"application/pdf", "application/x-pdf"}
@@ -56,35 +59,6 @@ SECTION_HEADINGS = {
 
 class CvValidationError(ValueError):
     pass
-
-
-class UploadRateLimiter:
-    """Small process-local limiter suitable for the deliberately local-only deployment."""
-
-    def __init__(self) -> None:
-        self._events: dict[str, deque[datetime]] = defaultdict(deque)
-        self._lock = threading.Lock()
-
-    def check(self, user_id: str, limit: int, now: datetime | None = None) -> None:
-        current = now or datetime.now(UTC)
-        cutoff = current - timedelta(minutes=1)
-        with self._lock:
-            events = self._events[user_id]
-            while events and events[0] <= cutoff:
-                events.popleft()
-            if len(events) >= limit:
-                raise HTTPException(
-                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                    detail="Too many CV uploads. Wait one minute and try again.",
-                )
-            events.append(current)
-
-    def reset(self) -> None:
-        with self._lock:
-            self._events.clear()
-
-
-upload_rate_limiter = UploadRateLimiter()
 
 
 class LocalCvStorage:
@@ -323,15 +297,58 @@ def serialize_import_summary(record: CvImport, storage: LocalCvStorage) -> CvImp
     )
 
 
+def _persist_extracted_fields(
+    uow: UnitOfWork, extraction_run: CvExtractionRun, draft: dict
+) -> None:
+    def walk(value: Any, path: str) -> None:
+        if isinstance(value, dict) and {"value", "confidence", "evidence"} <= value.keys():
+            field = CvExtractedField(
+                extraction_run_id=extraction_run.id,
+                field_path=path,
+                value={"value": value.get("value")},
+                confidence=float(value.get("confidence", 0)),
+                ambiguous=bool(value.get("ambiguous", False)),
+            )
+            uow.add(field)
+            uow.flush()
+            for item in value.get("evidence", []):
+                uow.add(
+                    CvExtractionEvidence(
+                        extracted_field_id=field.id,
+                        page=int(item.get("page", 1)),
+                        quote=str(item.get("quote", "")),
+                        method=str(item.get("method", "deterministic")),
+                    )
+                )
+            return
+        if isinstance(value, dict):
+            for key, item in value.items():
+                walk(item, f"{path}.{key}" if path else key)
+        elif isinstance(value, list):
+            for index, item in enumerate(value):
+                walk(item, f"{path}[{index}]")
+
+    walk(draft, "")
+
+
 async def create_cv_import(
-    db: Session,
+    uow: UnitOfWork,
     upload: UploadFile,
     user: User,
     settings: Settings,
     provider: CvExtractionProvider,
     storage: LocalCvStorage,
 ) -> CvImport:
-    upload_rate_limiter.check(user.id, settings.cv_uploads_per_minute)
+    if not uow.cvs.record_upload_attempt(
+        user.id, settings.cv_uploads_per_minute, datetime.now(UTC)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many CV uploads. Wait one minute and try again.",
+        )
+    # Persist the distributed rate-limit decision before parsing begins so failed or malicious
+    # uploads still count and the PostgreSQL advisory lock is released promptly.
+    uow.commit()
     try:
         filename = validate_upload_metadata(upload)
     except CvValidationError as exc:
@@ -364,13 +381,32 @@ async def create_cv_import(
         extracted_pages=pages,
         validation={"unsupported_claims": [], "scanned_likely": False, "user_edited": False},
     )
-    db.add(record)
-    db.flush()
+    uow.add(record)
+    uow.flush()
+    uow.add(
+        StoredFile(
+            owner_id=user.id,
+            cv_import_id=record.id,
+            storage_key=key,
+            original_filename=filename,
+            media_type="application/pdf",
+            size_bytes=size,
+            sha256=digest,
+            retention_status=RetentionStatus.ACTIVE,
+        )
+    )
+    extraction_run = CvExtractionRun(
+        cv_import_id=record.id, attempt=1, status="TEXT_EXTRACTED", model_metadata={}
+    )
+    uow.add(extraction_run)
+    uow.flush()
     record.status = CvImportStatus.TEXT_EXTRACTED
     extracted_characters = sum(len(re.sub(r"\s", "", page["text"])) for page in pages)
     if extracted_characters < settings.cv_min_extracted_characters:
         record.validation = {**record.validation, "scanned_likely": True}
-        write_audit(db, user.id, "cv_import.scanned_detected", "cv_import", record.id)
+        extraction_run.status = "SCANNED_DOCUMENT"
+        extraction_run.ended_at = datetime.now(UTC)
+        write_audit(uow, user.id, "cv_import.scanned_detected", "cv_import", record.id)
         return record
     record.sections = identify_sections(pages)
     try:
@@ -379,7 +415,7 @@ async def create_cv_import(
         )
     except AIProviderError as exc:
         storage.delete(key)
-        db.delete(record)
+        uow.delete(record)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="CV extraction is temporarily unavailable. Please try again.",
@@ -388,10 +424,14 @@ async def create_cv_import(
     record.draft = normalize_draft(grounded).model_dump(mode="json")
     record.validation = {**record.validation, "unsupported_claims": unsupported}
     record.model_metadata = metadata.__dict__
+    extraction_run.status = "SUCCEEDED"
+    extraction_run.model_metadata = metadata.__dict__
+    extraction_run.ended_at = datetime.now(UTC)
+    _persist_extracted_fields(uow, extraction_run, record.draft)
     record.status = CvImportStatus.PROFILE_PARSED
     record.status = CvImportStatus.AWAITING_REVIEW
     write_audit(
-        db,
+        uow,
         user.id,
         "cv_import.created",
         "cv_import",
@@ -401,17 +441,16 @@ async def create_cv_import(
     return record
 
 
-def get_owned_import(db: Session, import_id: str, user_id: str, lock: bool = False) -> CvImport:
-    query = select(CvImport).where(CvImport.id == import_id, CvImport.user_id == user_id)
-    if lock:
-        query = query.with_for_update()
-    record = db.scalar(query)
+def get_owned_import(uow: UnitOfWork, import_id: str, user_id: str, lock: bool = False) -> CvImport:
+    record = uow.cvs.get_import(import_id, user_id, lock=lock)
     if record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="CV import not found")
     return record
 
 
-def update_cv_draft(db: Session, record: CvImport, draft: CvProfileDraft, user: User) -> CvImport:
+def update_cv_draft(
+    uow: UnitOfWork, record: CvImport, draft: CvProfileDraft, user: User
+) -> CvImport:
     if record.status != CvImportStatus.AWAITING_REVIEW:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail="This CV draft is not editable"
@@ -425,7 +464,17 @@ def update_cv_draft(db: Session, record: CvImport, draft: CvProfileDraft, user: 
         "user_edited": True,
         "user_confirmed_fields": user_fields,
     }
-    write_audit(db, user.id, "cv_import.draft_updated", "cv_import", record.id)
+    for field_path in user_fields:
+        uow.add(
+            CvFieldCorrection(
+                cv_import_id=record.id,
+                actor_id=user.id,
+                field_path=field_path,
+                previous_value={"redacted": True},
+                corrected_value={"user_confirmed": True},
+            )
+        )
+    write_audit(uow, user.id, "cv_import.draft_updated", "cv_import", record.id)
     return record
 
 
@@ -486,8 +535,8 @@ def _value(field: dict) -> Any:
     return field.get("value")
 
 
-def compare_import(db: Session, record: CvImport, user: User) -> CvComparison:
-    profile = db.scalar(select(CandidateProfile).where(CandidateProfile.user_id == user.id))
+def compare_import(uow: UnitOfWork, record: CvImport, user: User) -> CvComparison:
+    profile = uow.candidates.get_profile(user.id)
     if not profile or not record.draft:
         return CvComparison(profile_exists=bool(profile), conflicts=[], additions=[])
     draft = record.draft
@@ -618,7 +667,7 @@ def _parse_date(value: object) -> date | None:
 
 
 def confirm_cv_import(
-    db: Session,
+    uow: UnitOfWork,
     record: CvImport,
     user: User,
     strategy: str,
@@ -628,7 +677,7 @@ def confirm_cv_import(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail="CV import is not ready to confirm"
         )
-    comparison = compare_import(db, record, user)
+    comparison = compare_import(uow, record, user)
     if strategy == "merge" and comparison.conflicts and not accept_conflicts:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -638,15 +687,12 @@ def confirm_cv_import(
             },
         )
     values = _profile_values(record.draft)
-    profile = db.scalar(
-        select(CandidateProfile).where(CandidateProfile.user_id == user.id).with_for_update()
-    )
+    profile = uow.candidates.get_profile(user.id, lock=True)
     children = _profile_children(record.draft)
     if profile is None:
         profile = CandidateProfile(user_id=user.id, **values)
         profile.skills, profile.languages, profile.employment = children
-        db.add(profile)
-        db.flush()
+        uow.add(profile)
     elif strategy == "replace":
         for field, value in values.items():
             setattr(profile, field, value)
@@ -673,13 +719,11 @@ def confirm_cv_import(
             if (item.company.casefold(), item.title.casefold(), item.start_date)
             not in existing_jobs
         )
+    uow.candidates.sync_skills(profile)
+    uow.flush()
     record.status = CvImportStatus.PROFILE_CONFIRMED
-    next_version = (
-        db.scalar(
-            select(func.max(ProfileVersion.version)).where(ProfileVersion.profile_id == profile.id)
-        )
-        or 0
-    ) + 1
+    uow.candidates.replace_extended_profile(profile.id, record.draft)
+    next_version = uow.candidates.next_profile_version(profile.id)
     version = ProfileVersion(
         user_id=user.id,
         profile_id=profile.id,
@@ -688,10 +732,10 @@ def confirm_cv_import(
         strategy=strategy,
         snapshot=record.draft,
     )
-    db.add(version)
+    uow.add(version)
     record.status = CvImportStatus.PROFILE_SAVED
     write_audit(
-        db,
+        uow,
         user.id,
         "cv_import.profile_saved",
         "cv_import",
@@ -701,28 +745,34 @@ def confirm_cv_import(
     return profile, version
 
 
-def delete_cv_file(db: Session, record: CvImport, user: User, storage: LocalCvStorage) -> None:
+def delete_cv_file(uow: UnitOfWork, record: CvImport, user: User, storage: LocalCvStorage) -> None:
     storage.delete(record.storage_key)
     record.storage_key = None
     record.file_deleted_at = datetime.now(UTC)
-    write_audit(db, user.id, "cv_import.file_deleted", "cv_import", record.id)
+    file_record = uow.cvs.file_for_import(record.id)
+    if file_record:
+        file_record.retention_status = RetentionStatus.DELETED
+        file_record.deleted_at = record.file_deleted_at
+    write_audit(uow, user.id, "cv_import.file_deleted", "cv_import", record.id)
 
 
-def delete_cv_import(db: Session, record: CvImport, user: User, storage: LocalCvStorage) -> None:
+def delete_cv_import(
+    uow: UnitOfWork, record: CvImport, user: User, storage: LocalCvStorage
+) -> None:
     storage.delete(record.storage_key)
-    write_audit(db, user.id, "cv_import.deleted", "cv_import", record.id)
-    db.delete(record)
+    write_audit(uow, user.id, "cv_import.deleted", "cv_import", record.id)
+    uow.delete(record)
 
 
-def purge_expired_files(db: Session, settings: Settings, storage: LocalCvStorage) -> int:
+def purge_expired_files(uow: UnitOfWork, settings: Settings, storage: LocalCvStorage) -> int:
     cutoff = datetime.now(UTC) - timedelta(days=settings.cv_retention_days)
-    records = list(
-        db.scalars(
-            select(CvImport).where(CvImport.created_at < cutoff, CvImport.storage_key.is_not(None))
-        )
-    )
+    records = uow.cvs.expired_imports(cutoff)
     for record in records:
         storage.delete(record.storage_key)
         record.storage_key = None
         record.file_deleted_at = datetime.now(UTC)
+        file_record = uow.cvs.file_for_import(record.id)
+        if file_record:
+            file_record.retention_status = RetentionStatus.DELETED
+            file_record.deleted_at = record.file_deleted_at
     return len(records)

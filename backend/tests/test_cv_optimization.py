@@ -21,6 +21,7 @@ from app.models import (
     Job,
     ProfileVersion,
 )
+from app.repositories import SqlAlchemyUnitOfWork
 from app.services import current_development_user
 
 
@@ -71,12 +72,12 @@ def seeded_optimization(client):
         },
     ).json()
     db = client.app.state.test_session
-    user = current_development_user(db)
+    user = current_development_user(SqlAlchemyUnitOfWork(db))
     profile = db.query(CandidateProfile).filter_by(user_id=user.id).one()
     version = ProfileVersion(
         user_id=user.id,
         profile_id=profile.id,
-        version=1,
+        version=2,
         strategy="replace",
         snapshot=approved_draft().model_dump(mode="json"),
     )

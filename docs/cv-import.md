@@ -73,8 +73,9 @@ access to the API identity. Never serve this directory from Nginx or a static fi
   `AI_FALLBACK_TO_MOCK=true`, deterministic parsing is used instead.
 - Draft validation errors return HTTP 422. Missing/invalid name or email blocks confirmation with
   HTTP 409. Merge conflicts also return 409 until explicitly acknowledged.
-- Upload rate limiting is process-local because the product is local-only. A multi-worker release
-  requires a shared authenticated rate limiter; production startup remains intentionally disabled.
+- Upload attempts are counted in PostgreSQL and serialized per user with a transaction advisory
+  lock, so multiple API workers share the same limit. Production still requires authenticated
+  identity-aware limits and remains intentionally disabled.
 
 ## Manual verification
 

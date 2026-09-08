@@ -45,7 +45,8 @@ bandit -q -r app
 
 ```bash
 pip-audit --skip-editable
-DATABASE_URL=sqlite:///./migration_check.db alembic upgrade head
+TEST_POSTGRES_URL=postgresql+psycopg://jobagent_test:jobagent_test@localhost:55432/jobagent_test pytest -q tests/test_postgres_integration.py
+DATABASE_URL=postgresql+psycopg://jobagent_test:jobagent_test@localhost:55432/jobagent_test alembic upgrade head
 cd ../frontend && pnpm lint && pnpm build && pnpm audit --audit-level high
 ```
 

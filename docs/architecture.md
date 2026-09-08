@@ -6,9 +6,10 @@ ranking pipeline are documented in [job-discovery.md](job-discovery.md).
 ## Runtime architecture
 
 The repository contains a React/Vite dashboard and a modular FastAPI API. Pydantic validates
-the public boundary, service/domain modules own business rules, SQLAlchemy owns persistence,
-and Alembic owns schema evolution. PostgreSQL is used by Compose; SQLite is supported for
-native development and deterministic tests.
+the public boundary, service/domain modules own business rules, repository protocols define the
+persistence port, SQLAlchemy adapters implement that port, and Alembic owns schema evolution.
+PostgreSQL is authoritative for structured runtime data. SQLite is limited to isolated unit tests
+and the explicit legacy-data import source.
 
 ```mermaid
 flowchart LR
@@ -16,16 +17,19 @@ flowchart LR
   Routes --> Services["Application services"]
   Services --> Matching["Deterministic matcher"]
   Services --> Generation["Grounded generation"]
-  Services --> ORM["SQLAlchemy session"]
-  ORM --> Database[("PostgreSQL or SQLite")]
+  Services --> Ports["Repository and unit-of-work protocols"]
+  Ports --> Adapters["SQLAlchemy repositories"]
+  Adapters --> Database[("PostgreSQL")]
+  Worker["Discovery scheduler worker"] --> Services
   Generation --> Mock["Deterministic mock provider"]
   Generation -. "optional development mode" .-> OpenAI["OpenAI Responses API"]
 ```
 
-The browser never contacts an AI provider. Provider calls are synchronous because the API
-currently returns a completed document package. The service ends its read transaction before
-the external request, then reacquires and revalidates the application row under a lock before
-version allocation and persistence. No queue, worker, Redis, or shared cache exists.
+The browser never contacts an AI provider. Document-provider calls are synchronous because the API
+currently returns a completed document package. Services end their read transaction before the
+external request, then reacquire and revalidate records under narrowly scoped row locks before
+version allocation and persistence. Discovery scheduling uses a database-coordinated worker with
+`FOR UPDATE SKIP LOCKED`; no queue, Redis, or shared cache exists.
 
 ## Module responsibilities
 
@@ -46,6 +50,10 @@ version allocation and persistence. No queue, worker, Redis, or shared cache exi
 | `app/cover_letter_api.py` | Thin user-scoped cover-letter and private export routes |
 | `app/schemas.py` | Strict request validation and public response contracts |
 | `app/models.py` | SQLAlchemy tables, relationships, constraints, and indexes |
+| `app/repositories/contracts.py` | Persistence protocols consumed by services |
+| `app/repositories/sqlalchemy.py` | PostgreSQL/SQLAlchemy query implementations and unit of work |
+| `app/unit_of_work.py` | FastAPI dependency that owns request transaction scope |
+| `app/cli/migrate_local_data.py` | Backup-first, idempotent legacy SQLite importer |
 | `app/config.py` | Typed environment configuration and production fail-closed guard |
 
 Cover letters reuse the existing application, approved profile version, deterministic match, AI
@@ -82,8 +90,13 @@ erDiagram
   USERS ||--o{ AUDIT_LOGS : creates
   USERS ||--o{ CV_IMPORTS : owns
   CANDIDATE_PROFILES ||--o{ PROFILE_SKILLS : has
+  SKILLS ||--o{ PROFILE_SKILLS : normalizes
   CANDIDATE_PROFILES ||--o{ PROFILE_LANGUAGES : has
   CANDIDATE_PROFILES ||--o{ EMPLOYMENT_ENTRIES : has
+  CANDIDATE_PROFILES ||--o{ CANDIDATE_EDUCATION : has
+  CANDIDATE_PROFILES ||--o{ CANDIDATE_CERTIFICATIONS : has
+  CANDIDATE_PROFILES ||--o{ CANDIDATE_PROJECTS : has
+  CANDIDATE_PROJECTS }o--o{ SKILLS : uses
   CANDIDATE_PROFILES ||--o{ PROFILE_VERSIONS : snapshots
   CV_IMPORTS ||--o{ PROFILE_VERSIONS : produces
   JOBS ||--o{ APPLICATIONS : tracks
@@ -94,7 +107,15 @@ erDiagram
   DISCOVERY_PROVIDER_RUNS ||--o{ DISCOVERY_RAW_RESULTS : retains
   DISCOVERY_SEARCH_RUNS ||--o{ DISCOVERY_MATCH_RESULTS : ranks
   JOBS ||--o{ DISCOVERY_JOB_SOURCES : references
+  JOBS ||--o{ JOB_VERSIONS : versions
+  JOB_VERSIONS ||--o{ JOB_REQUIREMENTS : contains
+  JOB_VERSIONS }o--o{ SKILLS : requires
   JOBS ||--o{ DISCOVERY_MATCH_RESULTS : scores
+  DISCOVERY_MATCH_RESULTS ||--o{ MATCH_VERSIONS : versions
+  PROFILE_VERSIONS ||--o{ MATCH_VERSIONS : candidate_input
+  JOB_VERSIONS ||--o{ MATCH_VERSIONS : job_input
+  MATCH_VERSIONS ||--o{ MATCH_SCORE_COMPONENTS : explains
+  MATCH_VERSIONS }o--o{ SKILLS : compares
   USERS ||--o{ DISCOVERY_NOTIFICATIONS : receives
   APPLICATIONS ||--o{ APPLICATION_STATUS_HISTORY : records
   APPLICATIONS ||--o{ GENERATED_DOCUMENTS : versions
@@ -108,6 +129,10 @@ erDiagram
   CV_VARIANTS ||--o{ CV_VARIANT_VERSIONS : versions
   CV_VARIANT_VERSIONS ||--o| CV_VARIANT_VALIDATIONS : validates
   CV_VARIANT_VERSIONS ||--o{ CV_EXPORTS : exports
+  USERS ||--o{ STORED_FILES : owns
+  CV_IMPORTS ||--o| STORED_FILES : metadata
+  CV_EXPORTS ||--o| STORED_FILES : metadata
+  DOCUMENT_EXPORTS ||--o| STORED_FILES : metadata
 ```
 
 Jobs are deduplicated by unique source/external ID, normalized URL, and a stable content hash.
@@ -115,7 +140,9 @@ Applications are unique per user/job. Status history and audit logs are append-o
 workflow actions; generated documents are unique per application/version. Composite indexes
 support ordered job, application, and history queries.
 
-CV uploads are streamed to a private local-storage boundary under generated UUID keys. PDF and AI
+CV uploads are streamed to a private blob-storage boundary under generated UUID keys. PostgreSQL
+keeps ownership, MIME type, size, checksum, retention, and deletion metadata for every stored file.
+PDF and AI
 work run in a worker thread so the async server event loop remains responsive. Extracted pages stay
 in the user-scoped import record to support evidence review; immutable profile versions preserve the
 entire approved rich profile while the existing normalized profile tables receive the fields used by

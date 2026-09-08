@@ -10,7 +10,10 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     app_env: Literal["development", "test", "production"] = "development"
-    database_url: str = Field(default="sqlite:///./job_agent.db", repr=False)
+    database_url: str = Field(
+        default="postgresql+psycopg://jobagent@localhost:5432/jobagent",
+        repr=False,
+    )
     cors_origins: str = "http://localhost:5173"
     openai_api_key: SecretStr | None = None
     openai_model: str = "gpt-5.4-mini-2026-03-17"
@@ -90,6 +93,11 @@ class Settings(BaseSettings):
             )
         if self.ai_generation_mode == "openai" and not self.openai_api_key:
             raise ValueError("OPENAI_API_KEY is required when AI_GENERATION_MODE=openai")
+        if self.app_env != "test" and self.database_url.startswith("sqlite"):
+            raise ValueError(
+                "SQLite is supported only for isolated tests and legacy-data migration; "
+                "configure PostgreSQL with DATABASE_URL"
+            )
         return self
 
     @property

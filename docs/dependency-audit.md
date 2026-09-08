@@ -1,6 +1,6 @@
 # Dependency audit
 
-Audit date: 2026-07-20
+Audit date: 2026-09-08
 
 ## Method and result
 
@@ -13,7 +13,9 @@ resolved dependency trees were scanned with `pip-audit` and `pnpm audit`.
 - Abandoned direct packages replaced: **none**; every direct package has a current registry
   release. The deprecated Starlette TestClient fallback to HTTPX was proactively replaced by
   its supported `httpx2` backend.
-- Known vulnerabilities in the resolved Python environment: **0**.
+- Known vulnerabilities in the resolved Python environment: **0 at the 2026-07-20 audit**.
+  The 2026-09-08 refresh timed out while retrieving PyPI advisory data; Ruff, mypy, Bandit, and
+  the complete backend suite still passed, and CI reruns `pip-audit` with network access.
 - Known vulnerabilities in the resolved frontend tree: **0**.
 - Direct-license blockers found: **none**. Psycopg is LGPL-3.0-only; all other direct packages
   use permissive MIT, BSD-3-Clause, Apache-2.0, or Unlicense terms.
@@ -88,6 +90,9 @@ It is a build tool, not an installed project dependency.
 - Updated the pnpm toolchain pin from 11.7.0 to 11.12.0.
 - Corrected CI to audit the installed Python environment rather than an empty local-project
   target, and to include frontend development dependencies instead of production packages only.
+- Added pnpm workspace overrides for patched `brace-expansion` 5.0.9, `nanoid` 3.3.18,
+  `postcss` 8.5.23, and `browserslist` 4.28.7 after new 2026 advisories affected transitive
+  lint/build tooling. The refreshed `pnpm audit --audit-level low` reports no vulnerabilities.
 
 The resolved frontend tree uses MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, MPL-2.0,
 and BlueOak-1.0.0 licenses. The MPL/BlueOak packages are transitive build-tool dependencies;

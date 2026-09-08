@@ -12,7 +12,7 @@ replace confirmation before anything reaches the candidate profile.
 
 Phases 2–6 are implemented:
 
-- FastAPI, SQLAlchemy, Alembic, PostgreSQL/SQLite configuration;
+- FastAPI, SQLAlchemy, Alembic, and authoritative PostgreSQL persistence;
 - candidate profiles, normalized jobs, applications, history, and audit events;
 - deterministic matching with configurable hard-rejection rules and explainable scores;
 - grounded AI document generation with mock and OpenAI provider modes;
@@ -36,6 +36,8 @@ CV recommendation grounding, review, variants, and exports are documented in
 [`docs/cv-optimization.md`](docs/cv-optimization.md).
 Cover-letter grounding, review, approval, exports, and limitations are documented in
 [`docs/cover-letters.md`](docs/cover-letters.md).
+The repository boundary, schema migration, backup/restore, and legacy SQLite importer are
+documented in [`docs/persistence.md`](docs/persistence.md).
 
 ## Prerequisites
 
@@ -69,7 +71,8 @@ unauthenticated development service and is unsupported.
 ## Native local setup
 
 From `backend/`, create a virtual environment, install development dependencies, copy the
-environment template into that directory, and use SQLite:
+environment template into that directory, and connect to PostgreSQL. A convenient local database
+is the Compose `db` service:
 
 ```powershell
 cd backend
@@ -77,11 +80,18 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
+Copy-Item ..\.env.example ..\.env
 Copy-Item ..\.env.example .env
-$env:DATABASE_URL = "sqlite:///./job_agent.db"
+docker compose -f ..\docker-compose.yml up -d db
+$env:DATABASE_URL = "postgresql+psycopg://jobagent:change-me@localhost:5432/jobagent"
 alembic upgrade head
 uvicorn app.main:app --reload --port 8000
 ```
+
+Set the same password in both local `.env` files and `DATABASE_URL` before starting the database.
+SQLite is intentionally
+accepted only under `APP_ENV=test` and as an input to the one-time legacy migration command; it is
+not a supported development runtime.
 
 In another terminal:
 
@@ -108,8 +118,9 @@ pytest -q --cov=app --cov-branch --cov-report=term-missing --cov-fail-under=80
 coverage report --include='app/ai.py,app/matching.py,app/services.py' --fail-under=90
 bandit -q -r app
 pip-audit --skip-editable
-DATABASE_URL=sqlite:///./migration_check.db alembic upgrade head
-DATABASE_URL=sqlite:///./migration_check.db alembic check
+TEST_POSTGRES_URL=postgresql+psycopg://jobagent_test:jobagent_test@localhost:55432/jobagent_test pytest -q tests/test_postgres_integration.py
+DATABASE_URL=postgresql+psycopg://jobagent_test:jobagent_test@localhost:55432/jobagent_test alembic upgrade head
+DATABASE_URL=postgresql+psycopg://jobagent_test:jobagent_test@localhost:55432/jobagent_test alembic check
 
 cd ../frontend
 pnpm lint
@@ -121,6 +132,7 @@ pnpm audit --audit-level high
 ## Documentation
 
 - [Architecture and data model](docs/architecture.md)
+- [PostgreSQL persistence and legacy-data migration](docs/persistence.md)
 - [API reference](docs/api.md)
 - [Environment configuration](docs/configuration.md)
 - [Local and container deployment](docs/deployment.md)

@@ -15,9 +15,6 @@ from typing import Any, Literal, cast
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import or_, select
-from sqlalchemy.orm import Session
-
 from app.config import Settings
 from app.discovery_providers import (
     PROVIDERS,
@@ -57,6 +54,7 @@ from app.models import (
     Job,
     User,
 )
+from app.repositories.contracts import UnitOfWork
 from app.services import write_audit
 
 logger = logging.getLogger("app.discovery")
@@ -149,26 +147,24 @@ def generate_search_preferences(profile: CandidateProfile) -> tuple[SearchPrefer
 
 
 def upsert_search_profile(
-    db: Session, user: User, preferences: SearchPreferences | None = None
+    uow: UnitOfWork, user: User, preferences: SearchPreferences | None = None
 ) -> DiscoverySearchProfile:
-    profile = db.scalar(select(CandidateProfile).where(CandidateProfile.user_id == user.id))
+    profile = uow.candidates.get_profile(user.id)
     if not profile:
         raise ValueError("An approved candidate profile is required.")
-    record = db.scalar(
-        select(DiscoverySearchProfile).where(DiscoverySearchProfile.user_id == user.id)
-    )
+    record = uow.discovery.get_search_profile(user.id)
     generated, terms = generate_search_preferences(profile)
     selected = preferences or generated
     if preferences:
         terms = _unique(preferences.target_titles + preferences.alternative_titles)
     if record is None:
         record = DiscoverySearchProfile(user_id=user.id)
-        db.add(record)
+        uow.add(record)
     record.preferences = selected.model_dump()
     record.generated_terms = terms
-    db.flush()
+    uow.flush()
     write_audit(
-        db, user.id, "discovery.search_profile.updated", "discovery_search_profile", record.id
+        uow, user.id, "discovery.search_profile.updated", "discovery_search_profile", record.id
     )
     return record
 
@@ -190,7 +186,7 @@ def calculate_next_run(
 
 
 def create_configuration(
-    db: Session, user: User, payload: SearchConfigurationCreate
+    uow: UnitOfWork, user: User, payload: SearchConfigurationCreate
 ) -> DiscoverySearchConfiguration:
     unknown = set(payload.provider_settings) - set(PROVIDERS)
     if unknown:
@@ -211,10 +207,15 @@ def create_configuration(
         hard_filters=payload.hard_filters.model_dump(),
     )
     record.next_run_at = calculate_next_run(record)
-    db.add(record)
-    db.flush()
+    uow.add(record)
+    uow.flush()
+    uow.discovery.sync_provider_configurations(user.id, record.provider_settings)
     write_audit(
-        db, user.id, "discovery.configuration.created", "discovery_search_configuration", record.id
+        uow,
+        user.id,
+        "discovery.configuration.created",
+        "discovery_search_configuration",
+        record.id,
     )
     return record
 
@@ -333,33 +334,24 @@ JOB_FIELDS = {
 }
 
 
-def merge_job(db: Session, data: dict[str, Any]) -> tuple[Job, str]:
+def merge_job(uow: UnitOfWork, data: dict[str, Any]) -> tuple[Job, str]:
     normalized_data = normalize_job(data)
     source, external_id = normalized_data["source"], normalized_data.get("external_job_id")
     exact = None
     if external_id:
-        link = db.scalar(
-            select(DiscoveryJobSource).where(
-                DiscoveryJobSource.provider == source,
-                DiscoveryJobSource.external_job_id == str(external_id),
-            )
-        )
-        exact = db.get(Job, link.job_id) if link else None
+        link = uow.discovery.job_source(source, str(external_id))
+        exact = uow.jobs.get(link.job_id) if link else None
     if exact is None and normalized_data.get("normalized_url"):
-        exact = db.scalar(
-            select(Job).where(Job.normalized_url == normalized_data["normalized_url"])
-        )
+        exact = uow.discovery.job_by_normalized_url(normalized_data["normalized_url"])
     relationship = "EXACT_DUPLICATE" if exact else "CANONICAL"
     if exact is None:
-        exact = db.scalar(select(Job).where(Job.content_hash == normalized_data["content_hash"]))
+        exact = uow.discovery.job_by_content_hash(normalized_data["content_hash"])
         relationship = "SAME_JOB_MULTIPLE_SOURCES" if exact else relationship
     if exact is None:
-        exact = db.scalar(
-            select(Job).where(
-                Job.company.ilike(normalized_data["company"]),
-                Job.title.ilike(normalized_data["title"]),
-                or_(Job.city == normalized_data.get("city"), Job.city.is_(None)),
-            )
+        exact = uow.discovery.likely_job(
+            normalized_data["company"],
+            normalized_data["title"],
+            normalized_data.get("city"),
         )
         relationship = "LIKELY_DUPLICATE" if exact else relationship
     if exact is None:
@@ -367,8 +359,8 @@ def merge_job(db: Session, data: dict[str, Any]) -> tuple[Job, str]:
             **{key: value for key, value in normalized_data.items() if key in JOB_FIELDS},
             raw_payload={},
         )
-        db.add(exact)
-        db.flush()
+        uow.add(exact)
+        uow.flush()
     else:
         old_hash = exact.content_hash
         if exact.source == source and old_hash != normalized_data["content_hash"]:
@@ -382,7 +374,7 @@ def merge_job(db: Session, data: dict[str, Any]) -> tuple[Job, str]:
             and normalized_data["posted_at"] > exact.posted_at + timedelta(days=21)
         ):
             relationship = "REPOSTED_JOB"
-        db.add(
+        uow.add(
             DiscoveryDuplicateGroup(
                 canonical_job_id=exact.id,
                 relationship=relationship,
@@ -392,14 +384,9 @@ def merge_job(db: Session, data: dict[str, Any]) -> tuple[Job, str]:
                 },
             )
         )
-    link = db.scalar(
-        select(DiscoveryJobSource).where(
-            DiscoveryJobSource.provider == source,
-            DiscoveryJobSource.external_job_id == (str(external_id) if external_id else None),
-        )
-    )
+    link = uow.discovery.job_source(source, str(external_id) if external_id else None)
     if link is None:
-        db.add(
+        uow.add(
             DiscoveryJobSource(
                 job_id=exact.id,
                 provider=source,
@@ -411,7 +398,8 @@ def merge_job(db: Session, data: dict[str, Any]) -> tuple[Job, str]:
     else:
         link.last_seen_at = datetime.now(UTC)
         link.relationship = relationship
-    db.flush()
+    uow.flush()
+    uow.jobs.save_version(exact)
     return exact, relationship
 
 
@@ -488,7 +476,7 @@ def apply_hard_filters(job: Job, analysis: dict[str, Any], filters: HardFilters)
 
 
 def _notify(
-    db: Session,
+    uow: UnitOfWork,
     user_id: str,
     event_type: str,
     key: str,
@@ -496,13 +484,9 @@ def _notify(
     body: str,
     job_id: str | None = None,
 ) -> None:
-    if db.scalar(
-        select(DiscoveryNotification.id).where(
-            DiscoveryNotification.user_id == user_id, DiscoveryNotification.deduplication_key == key
-        )
-    ):
+    if uow.discovery.notification_exists(user_id, key):
         return
-    db.add(
+    uow.add(
         DiscoveryNotification(
             user_id=user_id,
             event_type=event_type,
@@ -515,7 +499,7 @@ def _notify(
 
 
 def score_and_store(
-    db: Session,
+    uow: UnitOfWork,
     run: DiscoverySearchRun,
     profile: CandidateProfile,
     job: Job,
@@ -527,11 +511,7 @@ def score_and_store(
     reasons = apply_hard_filters(job, analysis, hard_filters)
     hard_rejected = analysis_model.hard_rejected or bool(reasons)
     recommendation = "REJECT" if hard_rejected else analysis_model.recommendation
-    result = db.scalar(
-        select(DiscoveryMatchResult).where(
-            DiscoveryMatchResult.run_id == run.id, DiscoveryMatchResult.job_id == job.id
-        )
-    )
+    result = uow.discovery.match_for_run(run.id, job.id)
     if result is None:
         result = DiscoveryMatchResult(
             user_id=run.user_id,
@@ -543,10 +523,21 @@ def score_and_store(
             rejection_reasons=reasons,
             analysis=analysis,
         )
-        db.add(result)
+        uow.add(result)
+        uow.flush()
+        profile_version = uow.candidates.latest_profile_version(run.user_id)
+        job_version = uow.jobs.save_version(job)
+        if profile_version:
+            uow.matches.save_explainable(
+                result=result,
+                profile_version=profile_version,
+                job_version=job_version,
+                analysis=analysis,
+                engine_version="deterministic-matching-v1",
+            )
     if recommendation == "STRONG_MATCH":
         _notify(
-            db,
+            uow,
             run.user_id,
             "NEW_STRONG_MATCH",
             f"strong:{job.id}:{job.content_hash}",
@@ -554,7 +545,7 @@ def score_and_store(
             f"{job.company} scored {analysis_model.overall_score}.",
             job.id,
         )
-    db.flush()
+    uow.flush()
     return result
 
 
@@ -580,7 +571,7 @@ def provider_configuration(
 
 
 def run_search(
-    db: Session,
+    uow: UnitOfWork,
     user: User,
     configuration: DiscoverySearchConfiguration,
     settings: Settings,
@@ -589,10 +580,8 @@ def run_search(
     http_client: HttpClient | None = None,
     scheduled_key: str | None = None,
 ) -> DiscoverySearchRun:
-    profile_record = db.scalar(
-        select(DiscoverySearchProfile).where(DiscoverySearchProfile.user_id == user.id)
-    )
-    profile = db.scalar(select(CandidateProfile).where(CandidateProfile.user_id == user.id))
+    profile_record = uow.discovery.get_search_profile(user.id)
+    profile = uow.candidates.get_profile(user.id)
     if profile_record is None or profile is None:
         raise ValueError("Generate a search profile from an approved candidate profile first.")
     run = DiscoverySearchRun(
@@ -603,8 +592,8 @@ def run_search(
         scheduled_key=scheduled_key,
         counters={},
     )
-    db.add(run)
-    db.flush()
+    uow.add(run)
+    uow.flush()
     counters = {
         "providers": 0,
         "provider_failures": 0,
@@ -625,19 +614,14 @@ def run_search(
             counters={},
             api_usage={},
         )
-        db.add(provider_run)
-        db.flush()
+        uow.add(provider_run)
+        uow.flush()
         counters["providers"] += 1
-        cursor_row = db.scalar(
-            select(DiscoveryProviderCursor).where(
-                DiscoveryProviderCursor.configuration_id == configuration.id,
-                DiscoveryProviderCursor.provider == key,
-            )
-        )
+        cursor_row = uow.discovery.provider_cursor(configuration.id, key, lock=True)
         if cursor_row is None:
             cursor_row = DiscoveryProviderCursor(configuration_id=configuration.id, provider=key)
-            db.add(cursor_row)
-            db.flush()
+            uow.add(cursor_row)
+            uow.flush()
         try:
             now = datetime.now(UTC)
             if cursor_row.circuit_open_until and cursor_row.circuit_open_until > now:
@@ -665,7 +649,7 @@ def run_search(
                 "duplicates": 0,
             }
             for query in queries:
-                db.add(DiscoverySearchQuery(run_id=run.id, provider=key, query=query))
+                uow.add(DiscoverySearchQuery(run_id=run.id, provider=key, query=query))
                 cursor: dict[str, Any] | None = None
                 for _ in range(10):
                     items, cursor, usage, retries = provider.search_with_retry(query, cursor)
@@ -674,7 +658,7 @@ def run_search(
                     for raw in items:
                         raw_json = json.dumps(raw, sort_keys=True, default=str)
                         payload_hash = hashlib.sha256(raw_json.encode()).hexdigest()
-                        db.add(
+                        uow.add(
                             DiscoveryRawResult(
                                 provider_run_id=provider_run.id,
                                 provider=key,
@@ -685,7 +669,7 @@ def run_search(
                         )
                         provider_counts["raw_results"] += 1
                         counters["raw_results"] += 1
-                        job, relationship = merge_job(db, provider.normalize(raw))
+                        job, relationship = merge_job(uow, provider.normalize(raw))
                         if relationship == "CANONICAL":
                             provider_counts["new_jobs"] += 1
                             counters["new_jobs"] += 1
@@ -696,7 +680,7 @@ def run_search(
                             continue
                         seen_ids.add(job.id)
                         match = score_and_store(
-                            db,
+                            uow,
                             run,
                             profile,
                             job,
@@ -707,7 +691,7 @@ def run_search(
                         counters["rejected_jobs"] += int(match.hard_rejected)
                         if relationship == "UPDATED_JOB":
                             _notify(
-                                db,
+                                uow,
                                 user.id,
                                 "JOB_CHANGED",
                                 f"job-changed:{job.id}:{job.content_hash}",
@@ -719,7 +703,7 @@ def run_search(
                             days=3
                         ):
                             _notify(
-                                db,
+                                uow,
                                 user.id,
                                 "JOB_EXPIRING",
                                 f"job-expiring:{job.id}:{job.expires_at.date()}",
@@ -749,7 +733,7 @@ def run_search(
                 if isinstance(exc, ProviderError)
                 else "Provider data could not be normalized."
             )
-            db.add(
+            uow.add(
                 DiscoveryProviderError(
                     provider_run_id=provider_run.id,
                     provider=key,
@@ -760,7 +744,7 @@ def run_search(
             )
             if cursor_row.failure_count >= 3:
                 _notify(
-                    db,
+                    uow,
                     user.id,
                     "PROVIDER_FAILURE",
                     f"provider-failure:{key}:{cursor_row.failure_count // 3}",
@@ -780,7 +764,7 @@ def run_search(
     configuration.last_run_at = run.ended_at
     configuration.next_run_at = calculate_next_run(configuration, run.ended_at)
     _notify(
-        db,
+        uow,
         user.id,
         "SEARCH_COMPLETED",
         f"search-completed:{run.id}",
@@ -788,7 +772,7 @@ def run_search(
         f"Found {counters['new_jobs']} new jobs and {counters['strong_matches']} strong matches.",
     )
     write_audit(
-        db,
+        uow,
         user.id,
         "discovery.search.completed",
         "discovery_search_run",
@@ -805,26 +789,19 @@ def run_search(
             }
         )
     )
-    db.flush()
+    uow.flush()
     return run
 
 
 def import_manual_jobs(
-    db: Session, user: User, items: list[ManualJobImport], settings: Settings
+    uow: UnitOfWork, user: User, items: list[ManualJobImport], settings: Settings
 ) -> tuple[int, int, list[str]]:
-    search_profile = db.scalar(
-        select(DiscoverySearchProfile).where(DiscoverySearchProfile.user_id == user.id)
-    )
+    search_profile = uow.discovery.get_search_profile(user.id)
     if search_profile is None:
-        upsert_search_profile(db, user)
-    config = db.scalar(
-        select(DiscoverySearchConfiguration).where(
-            DiscoverySearchConfiguration.user_id == user.id,
-            DiscoverySearchConfiguration.name == "Manual imports",
-        )
-    )
+        upsert_search_profile(uow, user)
+    config = uow.discovery.configuration_named(user.id, "Manual imports")
     if config is None:
-        config = create_configuration(db, user, SearchConfigurationCreate(name="Manual imports"))
+        config = create_configuration(uow, user, SearchConfigurationCreate(name="Manual imports"))
     run = DiscoverySearchRun(
         user_id=user.id,
         configuration_id=config.id,
@@ -832,8 +809,8 @@ def import_manual_jobs(
         trigger="IMPORT",
         counters={},
     )
-    db.add(run)
-    db.flush()
+    uow.add(run)
+    uow.flush()
     provider_run = DiscoveryProviderRun(
         run_id=run.id,
         provider="manual_import",
@@ -841,9 +818,9 @@ def import_manual_jobs(
         counters={},
         api_usage={},
     )
-    db.add(provider_run)
-    db.flush()
-    profile = db.scalar(select(CandidateProfile).where(CandidateProfile.user_id == user.id))
+    uow.add(provider_run)
+    uow.flush()
+    profile = uow.candidates.get_profile(user.id)
     if profile is None:
         raise ValueError("An approved candidate profile is required.")
     imported = duplicates = 0
@@ -857,7 +834,7 @@ def import_manual_jobs(
         raw_hash = hashlib.sha256(
             json.dumps(data, sort_keys=True, default=str).encode()
         ).hexdigest()
-        db.add(
+        uow.add(
             DiscoveryRawResult(
                 provider_run_id=provider_run.id,
                 provider=item.provider,
@@ -866,11 +843,11 @@ def import_manual_jobs(
                 payload_hash=raw_hash,
             )
         )
-        job, relationship = merge_job(db, data)
+        job, relationship = merge_job(uow, data)
         ids.append(job.id)
         imported += int(relationship == "CANONICAL")
         duplicates += int(relationship != "CANONICAL")
-        score_and_store(db, run, profile, job, settings, HardFilters())
+        score_and_store(uow, run, profile, job, settings, HardFilters())
     provider_run.status = DiscoveryRunStatus.SUCCEEDED
     provider_run.counters = {"imported": imported, "duplicates": duplicates}
     provider_run.ended_at = datetime.now(UTC)
@@ -879,7 +856,7 @@ def import_manual_jobs(
     run.counters = {"new_jobs": imported, "duplicates": duplicates}
     run.ended_at = datetime.now(UTC)
     write_audit(
-        db,
+        uow,
         user.id,
         "discovery.jobs.imported",
         "discovery_search_run",
@@ -939,41 +916,27 @@ def parse_email_import(provider: str, text: str) -> list[ManualJobImport]:
     ]
 
 
-def run_due_searches(db: Session, settings: Settings, now: datetime | None = None) -> list[str]:
+def run_due_searches(uow: UnitOfWork, settings: Settings, now: datetime | None = None) -> list[str]:
     moment = now or datetime.now(UTC)
-    configs = list(
-        db.scalars(
-            select(DiscoverySearchConfiguration)
-            .where(
-                DiscoverySearchConfiguration.enabled.is_(True),
-                DiscoverySearchConfiguration.next_run_at.is_not(None),
-                DiscoverySearchConfiguration.next_run_at <= moment,
-            )
-            .with_for_update(skip_locked=True)
-        )
-    )
+    configs = uow.discovery.due_configurations(moment)
     run_ids: list[str] = []
     for config in configs:
         scheduled_at = config.next_run_at
         if scheduled_at is None:
             continue
         key = f"{config.id}:{scheduled_at.isoformat()}"
-        if db.scalar(select(DiscoverySearchRun.id).where(DiscoverySearchRun.scheduled_key == key)):
+        if uow.discovery.scheduled_run_exists(key):
             continue
-        user = db.get(User, config.user_id)
+        user = uow.get_user(config.user_id)
         if user:
             run_ids.append(
-                run_search(db, user, config, settings, "SCHEDULED", scheduled_key=key).id
+                run_search(uow, user, config, settings, "SCHEDULED", scheduled_key=key).id
             )
     return run_ids
 
 
-def prepare_application(db: Session, user: User, match: DiscoveryMatchResult) -> Application:
-    application = db.scalar(
-        select(Application).where(
-            Application.user_id == user.id, Application.job_id == match.job_id
-        )
-    )
+def prepare_application(uow: UnitOfWork, user: User, match: DiscoveryMatchResult) -> Application:
+    application = uow.applications.get_for_job(user.id, match.job_id, lock=True)
     if application is None:
         application = Application(
             user_id=user.id,
@@ -982,9 +945,9 @@ def prepare_application(db: Session, user: User, match: DiscoveryMatchResult) ->
             match_score=match.score,
             match_analysis=match.analysis,
         )
-        db.add(application)
-        db.flush()
-        db.add(
+        uow.add(application)
+        uow.flush()
+        uow.add(
             ApplicationStatusHistory(
                 application_id=application.id,
                 from_status=None,
@@ -994,5 +957,5 @@ def prepare_application(db: Session, user: User, match: DiscoveryMatchResult) ->
             )
         )
     match.user_state = "PREPARED"
-    write_audit(db, user.id, "discovery.application.prepared", "application", application.id)
+    write_audit(uow, user.id, "discovery.application.prepared", "application", application.id)
     return application

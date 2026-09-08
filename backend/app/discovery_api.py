@@ -3,12 +3,9 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import or_, select
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, HTTPException, Query, status
 
 from app.config import get_settings
-from app.db import get_db
 from app.discovery import (
     create_configuration,
     import_manual_jobs,
@@ -36,17 +33,13 @@ from app.discovery_schemas import (
     SearchRunRequest,
 )
 from app.models import (
-    DiscoveryMatchResult,
     DiscoveryNotification,
-    DiscoveryProviderCursor,
-    DiscoveryProviderError,
-    DiscoveryProviderRun,
     DiscoverySearchConfiguration,
     DiscoverySearchProfile,
     DiscoverySearchRun,
-    Job,
 )
 from app.services import current_development_user, write_audit
+from app.unit_of_work import UnitOfWorkDependency
 
 router = APIRouter(prefix="/v1/discovery", tags=["discovery"])
 
@@ -56,31 +49,14 @@ def _bad_request(exc: ValueError) -> HTTPException:
 
 
 @router.get("/providers")
-def providers(db: Session = Depends(get_db)) -> list[dict[str, Any]]:
-    user = current_development_user(db)
+def providers(uow: UnitOfWorkDependency) -> list[dict[str, Any]]:
+    user = current_development_user(uow)
     settings = get_settings()
-    cursors = list(
-        db.scalars(
-            select(DiscoveryProviderCursor)
-            .join(DiscoverySearchConfiguration)
-            .where(DiscoverySearchConfiguration.user_id == user.id)
-        )
-    )
+    cursors = uow.discovery.list_provider_cursors(user.id)
     cursor_map = {item.provider: item for item in cursors}
-    errors = list(
-        db.scalars(
-            select(DiscoveryProviderError)
-            .join(
-                DiscoveryProviderRun,
-                DiscoveryProviderRun.id == DiscoveryProviderError.provider_run_id,
-            )
-            .join(DiscoverySearchRun, DiscoverySearchRun.id == DiscoveryProviderRun.run_id)
-            .where(DiscoverySearchRun.user_id == user.id)
-            .order_by(DiscoveryProviderError.created_at.desc())
-            .limit(50)
-        )
-    )
+    errors = uow.discovery.list_provider_errors(user.id)
     last_errors = {item.provider: item.safe_message for item in errors}
+    configurations = uow.discovery.list_configurations(user.id)
     result = provider_registry()
     for item in result:
         cursor = cursor_map.get(item["key"])
@@ -94,11 +70,7 @@ def providers(db: Session = Depends(get_db)) -> list[dict[str, Any]]:
             if item["key"] == "infojobs"
             else any(
                 bool(config.provider_settings.get("tecnoempleo", {}).get("feed_url"))
-                for config in db.scalars(
-                    select(DiscoverySearchConfiguration).where(
-                        DiscoverySearchConfiguration.user_id == user.id
-                    )
-                )
+                for config in configurations
             )
             if item["key"] == "tecnoempleo"
             else False
@@ -107,23 +79,21 @@ def providers(db: Session = Depends(get_db)) -> list[dict[str, Any]]:
 
 
 @router.post("/search-profile/generate", response_model=SearchProfileRead)
-def generate_profile(db: Session = Depends(get_db)) -> DiscoverySearchProfile:
-    user = current_development_user(db)
+def generate_profile(uow: UnitOfWorkDependency) -> DiscoverySearchProfile:
+    user = current_development_user(uow)
     try:
-        result = upsert_search_profile(db, user)
+        result = upsert_search_profile(uow, user)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-    db.commit()
-    db.refresh(result)
+    uow.commit()
+    uow.refresh(result)
     return result
 
 
 @router.get("/search-profile", response_model=SearchProfileRead)
-def get_profile(db: Session = Depends(get_db)) -> DiscoverySearchProfile:
-    user = current_development_user(db)
-    result = db.scalar(
-        select(DiscoverySearchProfile).where(DiscoverySearchProfile.user_id == user.id)
-    )
+def get_profile(uow: UnitOfWorkDependency) -> DiscoverySearchProfile:
+    user = current_development_user(uow)
+    result = uow.discovery.get_search_profile(user.id)
     if not result:
         raise HTTPException(status_code=404, detail="Search profile not found")
     return result
@@ -131,57 +101,44 @@ def get_profile(db: Session = Depends(get_db)) -> DiscoverySearchProfile:
 
 @router.put("/search-profile", response_model=SearchProfileRead)
 def replace_profile(
-    payload: SearchPreferences, db: Session = Depends(get_db)
+    payload: SearchPreferences, uow: UnitOfWorkDependency
 ) -> DiscoverySearchProfile:
-    user = current_development_user(db)
+    user = current_development_user(uow)
     try:
-        result = upsert_search_profile(db, user, payload)
+        result = upsert_search_profile(uow, user, payload)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    db.commit()
-    db.refresh(result)
+    uow.commit()
+    uow.refresh(result)
     return result
 
 
 @router.post("/configurations", response_model=SearchConfigurationRead, status_code=201)
 def add_configuration(
-    payload: SearchConfigurationCreate, db: Session = Depends(get_db)
+    payload: SearchConfigurationCreate, uow: UnitOfWorkDependency
 ) -> DiscoverySearchConfiguration:
-    user = current_development_user(db)
+    user = current_development_user(uow)
     try:
-        result = create_configuration(db, user, payload)
+        result = create_configuration(uow, user, payload)
     except ValueError as exc:
         raise _bad_request(exc) from exc
-    db.commit()
-    db.refresh(result)
+    uow.commit()
+    uow.refresh(result)
     return result
 
 
 @router.get("/configurations", response_model=list[SearchConfigurationRead])
-def configurations(db: Session = Depends(get_db)) -> list[DiscoverySearchConfiguration]:
-    user = current_development_user(db)
-    return list(
-        db.scalars(
-            select(DiscoverySearchConfiguration)
-            .where(DiscoverySearchConfiguration.user_id == user.id)
-            .order_by(DiscoverySearchConfiguration.created_at)
-        )
-    )
+def configurations(uow: UnitOfWorkDependency) -> list[DiscoverySearchConfiguration]:
+    user = current_development_user(uow)
+    return uow.discovery.list_configurations(user.id)
 
 
 @router.put("/configurations/{configuration_id}", response_model=SearchConfigurationRead)
 def replace_configuration(
-    configuration_id: str, payload: SearchConfigurationCreate, db: Session = Depends(get_db)
+    configuration_id: str, payload: SearchConfigurationCreate, uow: UnitOfWorkDependency
 ) -> DiscoverySearchConfiguration:
-    user = current_development_user(db)
-    current = db.scalar(
-        select(DiscoverySearchConfiguration)
-        .where(
-            DiscoverySearchConfiguration.id == configuration_id,
-            DiscoverySearchConfiguration.user_id == user.id,
-        )
-        .with_for_update()
-    )
+    user = current_development_user(uow)
+    current = uow.discovery.get_configuration(configuration_id, user.id, lock=True)
     if not current:
         raise HTTPException(status_code=404, detail="Search configuration not found")
     unknown = set(payload.provider_settings) - set(PROVIDERS)
@@ -201,97 +158,91 @@ def replace_configuration(
     current.schedule_time = payload.schedule_time
     current.timezone = payload.timezone
     current.hard_filters = payload.hard_filters.model_dump()
+    uow.discovery.sync_provider_configurations(user.id, current.provider_settings)
     from app.discovery import calculate_next_run
 
     current.next_run_at = calculate_next_run(current)
     write_audit(
-        db, user.id, "discovery.configuration.updated", "discovery_search_configuration", current.id
+        uow,
+        user.id,
+        "discovery.configuration.updated",
+        "discovery_search_configuration",
+        current.id,
     )
-    db.commit()
-    db.refresh(current)
+    uow.commit()
+    uow.refresh(current)
     return current
 
 
 @router.post("/search-runs", response_model=SearchRunRead, status_code=201)
-def start_search(payload: SearchRunRequest, db: Session = Depends(get_db)) -> DiscoverySearchRun:
-    user = current_development_user(db)
-    config = db.scalar(
-        select(DiscoverySearchConfiguration).where(
-            DiscoverySearchConfiguration.id == payload.configuration_id,
-            DiscoverySearchConfiguration.user_id == user.id,
-        )
-    )
+def start_search(payload: SearchRunRequest, uow: UnitOfWorkDependency) -> DiscoverySearchRun:
+    user = current_development_user(uow)
+    config = uow.discovery.get_configuration(payload.configuration_id, user.id)
     if not config:
         raise HTTPException(status_code=404, detail="Search configuration not found")
     try:
-        result = run_search(db, user, config, get_settings())
+        result = run_search(uow, user, config, get_settings())
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    db.commit()
-    db.refresh(result)
+    uow.commit()
+    uow.refresh(result)
     return result
 
 
 @router.post("/scheduler/tick", response_model=list[str])
-def scheduler_tick(db: Session = Depends(get_db)) -> list[str]:
-    current_development_user(db)
-    result = run_due_searches(db, get_settings())
-    db.commit()
+def scheduler_tick(uow: UnitOfWorkDependency) -> list[str]:
+    current_development_user(uow)
+    result = run_due_searches(uow, get_settings())
+    uow.commit()
     return result
 
 
 @router.get("/search-runs", response_model=list[SearchRunRead])
 def search_runs(
-    limit: int = Query(20, ge=1, le=100), db: Session = Depends(get_db)
+    uow: UnitOfWorkDependency, limit: int = Query(20, ge=1, le=100)
 ) -> list[DiscoverySearchRun]:
-    user = current_development_user(db)
-    return list(
-        db.scalars(
-            select(DiscoverySearchRun)
-            .where(DiscoverySearchRun.user_id == user.id)
-            .order_by(DiscoverySearchRun.started_at.desc())
-            .limit(limit)
-        )
-    )
+    user = current_development_user(uow)
+    return uow.discovery.list_runs(user.id, limit)
 
 
 @router.post("/imports/manual", response_model=ImportResult, status_code=201)
-def manual_import(payload: ManualJobImport, db: Session = Depends(get_db)) -> ImportResult:
-    user = current_development_user(db)
+def manual_import(payload: ManualJobImport, uow: UnitOfWorkDependency) -> ImportResult:
+    user = current_development_user(uow)
     try:
-        imported, duplicates, ids = import_manual_jobs(db, user, [payload], get_settings())
+        imported, duplicates, ids = import_manual_jobs(uow, user, [payload], get_settings())
     except ValueError as exc:
         raise _bad_request(exc) from exc
-    db.commit()
+    uow.commit()
     return ImportResult(imported=imported, duplicates=duplicates, job_ids=ids)
 
 
 @router.post("/imports/csv", response_model=ImportResult, status_code=201)
-def csv_import(payload: CsvImportRequest, db: Session = Depends(get_db)) -> ImportResult:
-    user = current_development_user(db)
+def csv_import(payload: CsvImportRequest, uow: UnitOfWorkDependency) -> ImportResult:
+    user = current_development_user(uow)
     try:
         items = parse_csv_import(payload.provider, payload.csv_text)
-        imported, duplicates, ids = import_manual_jobs(db, user, items, get_settings())
+        imported, duplicates, ids = import_manual_jobs(uow, user, items, get_settings())
     except ValueError as exc:
         raise _bad_request(exc) from exc
-    db.commit()
+    uow.commit()
     return ImportResult(imported=imported, duplicates=duplicates, job_ids=ids)
 
 
 @router.post("/imports/email", response_model=ImportResult, status_code=201)
-def email_import(payload: EmailImportRequest, db: Session = Depends(get_db)) -> ImportResult:
-    user = current_development_user(db)
+def email_import(payload: EmailImportRequest, uow: UnitOfWorkDependency) -> ImportResult:
+    user = current_development_user(uow)
     try:
         items = parse_email_import(payload.provider, payload.eml_text)
-        imported, duplicates, ids = import_manual_jobs(db, user, items, get_settings())
+        imported, duplicates, ids = import_manual_jobs(uow, user, items, get_settings())
     except ValueError as exc:
         raise _bad_request(exc) from exc
-    db.commit()
+    uow.commit()
     return ImportResult(imported=imported, duplicates=duplicates, job_ids=ids)
 
 
 @router.get("/matches", response_model=list[RankedJobRead])
 def ranked_matches(
+    uow: UnitOfWorkDependency,
     min_score: int = Query(0, ge=0, le=100),
     country: str | None = Query(None, max_length=2),
     provider: str | None = Query(None, max_length=40),
@@ -309,43 +260,27 @@ def ranked_matches(
     recommendation: str | None = Query(None, max_length=30),
     include_rejected: bool = False,
     limit: int = Query(100, ge=1, le=500),
-    db: Session = Depends(get_db),
 ) -> list[RankedJobRead]:
-    user = current_development_user(db)
-    statement = (
-        select(DiscoveryMatchResult, Job)
-        .join(Job, Job.id == DiscoveryMatchResult.job_id)
-        .where(DiscoveryMatchResult.user_id == user.id, DiscoveryMatchResult.score >= min_score)
+    user = current_development_user(uow)
+    rows = uow.discovery.list_ranked_matches(
+        user.id,
+        {
+            "min_score": min_score,
+            "country": country,
+            "provider": provider,
+            "city": city,
+            "company": company,
+            "role": role,
+            "seniority": seniority,
+            "workplace_type": workplace_type,
+            "industry": industry,
+            "minimum_salary": minimum_salary,
+            "posted_after": posted_after,
+            "recommendation": recommendation,
+            "include_rejected": include_rejected,
+            "limit": limit,
+        },
     )
-    if not include_rejected:
-        statement = statement.where(DiscoveryMatchResult.hard_rejected.is_(False))
-    if country:
-        statement = statement.where(Job.country == country.upper())
-    if provider:
-        statement = statement.where(Job.source == provider)
-    if recommendation:
-        statement = statement.where(DiscoveryMatchResult.recommendation == recommendation)
-    if city:
-        statement = statement.where(Job.city.ilike(city))
-    if company:
-        statement = statement.where(Job.company.ilike(f"%{company}%"))
-    if role:
-        statement = statement.where(Job.title.ilike(f"%{role}%"))
-    if seniority:
-        statement = statement.where(Job.seniority.ilike(seniority))
-    if workplace_type:
-        statement = statement.where(Job.workplace_type.ilike(workplace_type))
-    if industry:
-        statement = statement.where(Job.industry.ilike(industry))
-    if minimum_salary is not None:
-        statement = statement.where(
-            or_(Job.salary_max >= minimum_salary, Job.salary_min >= minimum_salary)
-        )
-    if posted_after:
-        statement = statement.where(Job.posted_at >= posted_after)
-    rows = db.execute(
-        statement.order_by(DiscoveryMatchResult.score.desc(), Job.posted_at.desc()).limit(limit)
-    ).all()
     seen: set[str] = set()
     output: list[RankedJobRead] = []
     for match, job in rows:
@@ -392,16 +327,14 @@ def ranked_matches(
 
 
 @router.get("/matches/{match_id}", response_model=RankedJobRead)
-def match_detail(match_id: str, db: Session = Depends(get_db)) -> RankedJobRead:
-    user = current_development_user(db)
-    row = db.execute(
-        select(DiscoveryMatchResult, Job)
-        .join(Job)
-        .where(DiscoveryMatchResult.id == match_id, DiscoveryMatchResult.user_id == user.id)
-    ).one_or_none()
-    if not row:
+def match_detail(match_id: str, uow: UnitOfWorkDependency) -> RankedJobRead:
+    user = current_development_user(uow)
+    match = uow.discovery.get_match(match_id, user.id)
+    if not match:
         raise HTTPException(status_code=404, detail="Match not found")
-    match, job = row
+    job = uow.jobs.get(match.job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
     return RankedJobRead(
         id=job.id,
         match_id=match.id,
@@ -425,58 +358,46 @@ def match_detail(match_id: str, db: Session = Depends(get_db)) -> RankedJobRead:
 
 
 @router.post("/matches/{match_id}/action")
-def match_action(
-    match_id: str, payload: MatchAction, db: Session = Depends(get_db)
-) -> dict[str, str]:
-    user = current_development_user(db)
-    match = db.scalar(
-        select(DiscoveryMatchResult)
-        .where(DiscoveryMatchResult.id == match_id, DiscoveryMatchResult.user_id == user.id)
-        .with_for_update()
-    )
+def match_action(match_id: str, payload: MatchAction, uow: UnitOfWorkDependency) -> dict[str, str]:
+    user = current_development_user(uow)
+    match = uow.discovery.get_match(match_id, user.id, lock=True)
     if not match:
         raise HTTPException(status_code=404, detail="Match not found")
     if payload.action == "PREPARE_APPLICATION":
-        application = prepare_application(db, user, match)
+        application = prepare_application(uow, user, match)
         result = {"state": match.user_state, "application_id": application.id}
     else:
         match.user_state = (
             payload.action.removesuffix("E") + "ED" if payload.action == "SAVE" else "REJECTED"
         )
         write_audit(
-            db,
+            uow,
             user.id,
             f"discovery.match.{payload.action.lower()}",
             "discovery_match_result",
             match.id,
         )
         result = {"state": match.user_state}
-    db.commit()
+    uow.matches.record_decision(match.id, user.id, match.user_state)
+    uow.commit()
     return result
 
 
 @router.get("/notifications", response_model=list[NotificationRead])
 def notifications(
-    unread_only: bool = False, db: Session = Depends(get_db)
+    uow: UnitOfWorkDependency, unread_only: bool = False
 ) -> list[DiscoveryNotification]:
-    user = current_development_user(db)
-    statement = select(DiscoveryNotification).where(DiscoveryNotification.user_id == user.id)
-    if unread_only:
-        statement = statement.where(DiscoveryNotification.read_at.is_(None))
-    return list(db.scalars(statement.order_by(DiscoveryNotification.created_at.desc()).limit(100)))
+    user = current_development_user(uow)
+    return uow.discovery.list_notifications(user.id, unread_only=unread_only)
 
 
 @router.post("/notifications/{notification_id}/read", response_model=NotificationRead)
-def read_notification(notification_id: str, db: Session = Depends(get_db)) -> DiscoveryNotification:
-    user = current_development_user(db)
-    item = db.scalar(
-        select(DiscoveryNotification).where(
-            DiscoveryNotification.id == notification_id, DiscoveryNotification.user_id == user.id
-        )
-    )
+def read_notification(notification_id: str, uow: UnitOfWorkDependency) -> DiscoveryNotification:
+    user = current_development_user(uow)
+    item = uow.discovery.get_notification(notification_id, user.id)
     if not item:
         raise HTTPException(status_code=404, detail="Notification not found")
     item.read_at = datetime.now(UTC)
-    db.commit()
-    db.refresh(item)
+    uow.commit()
+    uow.refresh(item)
     return item
